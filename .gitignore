@@ -1,0 +1,8 @@
+/target
+/models/*.bin
+/models/*.gguf
+/models/*.onnx
+/models/kokoro-voices/
+.env
+*.wav
+*.mp3

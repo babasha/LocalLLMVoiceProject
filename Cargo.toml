@@ -1,0 +1,56 @@
+[package]
+name = "voice-translator"
+version = "0.1.0"
+edition = "2021"
+description = "Real-time voice translator (RU↔EN) with native GPU acceleration"
+
+[dependencies]
+# Audio I/O
+cpal = "0.15"
+
+# Lock-free ring buffer for real-time audio
+rtrb = "0.3"
+
+# Inter-thread messaging
+crossbeam-channel = "0.5"
+
+# Audio resampling
+rubato = "0.16"
+
+# Config
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Ctrl+C handling
+ctrlc = "3.4"
+
+# Utilities
+hound = "3.5"
+
+# Phase 2+ dependencies (uncomment when needed):
+# silero-vad = "0.1"
+# whisper-rs = { version = "0.15", features = ["cuda"] }
+# llama-cpp-2 = { version = "0.1", features = ["cuda"] }
+# kokoro-tts = "0.3"
+# piper-rs = "0.1"
+# espeak-rs = "0.1"
+# ort = { version = "2", features = ["cuda"] }
+
+[dev-dependencies]
+assert_no_alloc = "1.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

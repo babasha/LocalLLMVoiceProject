@@ -1,0 +1,57 @@
+# Voice Translator Configuration
+
+[audio]
+# Sample rate for capture and processing
+sample_rate = 16000
+# Number of channels (mono for speech)
+channels = 1
+# Ring buffer capacity in samples (~1 second at 16kHz)
+ring_buffer_capacity = 16384
+# Output device name substring for VB-Cable (leave empty for default)
+vb_cable_device = ""
+# Enable dual output (speakers + VB-Cable)
+dual_output = false
+
+[languages]
+# Source language (what you speak)
+source = "ru"
+# Target language (what gets synthesized)
+target = "en"
+
+[vad]
+# Speech detection threshold (0.0 - 1.0)
+threshold = 0.5
+# Silence duration (ms) to mark end of speech
+silence_duration_ms = 300
+# Minimum speech duration (ms) to process
+min_speech_duration_ms = 250
+
+[stt]
+# Path to Whisper model
+model_path = "models/ggml-large-v3-turbo-q8.bin"
+# Language hint (empty = auto-detect)
+language = ""
+
+[translation]
+# Path to Qwen3.5-2B GGUF model
+model_path = "models/Qwen3.5-2B-Q4_K_M.gguf"
+# Number of GPU layers to offload
+n_gpu_layers = 99
+# Context size
+context_size = 2048
+# Max tokens to generate per translation
+max_tokens = 128
+# Temperature
+temperature = 0.1
+
+[tts]
+# TTS engine: "kokoro" or "piper"
+engine = "kokoro"
+# Kokoro model path
+kokoro_model_path = "models/kokoro-v0_19-fp16.onnx"
+# Piper model path
+piper_model_path = "models/piper-en_US-lessac-medium.onnx"
+# Voice name/id for Kokoro
+kokoro_voice = "af_heart"
+# Output sample rate
+output_sample_rate = 24000
