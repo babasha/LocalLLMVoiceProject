@@ -13,9 +13,42 @@
       <span class="status-badge" id="statusBadge">Stopped</span>
     </header>
 
+    <!-- Audio Input (Microphone) — NVIDIA Broadcast style -->
+    <section class="card device-card">
+      <div class="card-header">
+        <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+          <line x1="12" y1="19" x2="12" y2="23"/>
+          <line x1="8" y1="23" x2="16" y2="23"/>
+        </svg>
+        <label class="card-title">Microphone Input</label>
+      </div>
+      <select id="inputDevice" class="device-select"></select>
+      <div class="level-meter-container">
+        <div class="level-meter">
+          <div class="level-bar" id="levelBar"></div>
+        </div>
+        <span class="level-label" id="levelLabel">-60 dB</span>
+      </div>
+    </section>
+
+    <!-- Audio Output (Speaker) -->
+    <section class="card device-card">
+      <div class="card-header">
+        <svg class="card-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+          <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+          <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+        </svg>
+        <label class="card-title">Speaker Output</label>
+      </div>
+      <select id="outputDevice" class="device-select"></select>
+    </section>
+
     <!-- Mode Selector -->
     <section class="card">
-      <label class="card-title">Mode</label>
+      <label class="card-title">Pipeline Mode</label>
       <div class="mode-selector">
         <button class="mode-btn active" data-mode="passthrough">Passthrough</button>
         <button class="mode-btn" data-mode="stt">STT Only</button>
@@ -25,63 +58,69 @@
 
     <!-- Language Pair -->
     <section class="card">
-      <label class="card-title">Languages</label>
+      <label class="card-title">Translation</label>
       <div class="lang-row">
-        <select id="sourceLang">
-          <option value="ru" selected>Russian</option>
-          <option value="en">English</option>
-          <option value="de">German</option>
-          <option value="fr">French</option>
-          <option value="es">Spanish</option>
-          <option value="zh">Chinese</option>
-          <option value="ja">Japanese</option>
-          <option value="ko">Korean</option>
-        </select>
-        <button class="swap-btn" id="swapLangs" title="Swap languages">&#8644;</button>
-        <select id="targetLang">
-          <option value="ru">Russian</option>
-          <option value="en" selected>English</option>
-          <option value="de">German</option>
-          <option value="fr">French</option>
-          <option value="es">Spanish</option>
-          <option value="zh">Chinese</option>
-          <option value="ja">Japanese</option>
-          <option value="ko">Korean</option>
-        </select>
+        <div class="lang-group">
+          <span class="lang-label">Source</span>
+          <select id="sourceLang">
+            <option value="ru" selected>Russian</option>
+            <option value="en">English</option>
+            <option value="de">German</option>
+            <option value="fr">French</option>
+            <option value="es">Spanish</option>
+            <option value="zh">Chinese</option>
+            <option value="ja">Japanese</option>
+            <option value="ko">Korean</option>
+          </select>
+        </div>
+        <button class="swap-btn" id="swapLangs" title="Swap languages">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+            <path d="M7 16l-4-4 4-4"/><path d="M17 8l4 4-4 4"/><line x1="3" y1="12" x2="21" y2="12"/>
+          </svg>
+        </button>
+        <div class="lang-group">
+          <span class="lang-label">Target</span>
+          <select id="targetLang">
+            <option value="ru">Russian</option>
+            <option value="en" selected>English</option>
+            <option value="de">German</option>
+            <option value="fr">French</option>
+            <option value="es">Spanish</option>
+            <option value="zh">Chinese</option>
+            <option value="ja">Japanese</option>
+            <option value="ko">Korean</option>
+          </select>
+        </div>
       </div>
     </section>
 
     <!-- Start/Stop Button -->
-    <section class="card center">
-      <button class="start-btn" id="startBtn">Start</button>
-    </section>
-
-    <!-- Audio Devices -->
-    <section class="card">
-      <label class="card-title">Audio Devices</label>
-      <div id="deviceList" class="device-list">
-        <span class="muted">Loading...</span>
-      </div>
-    </section>
+    <button class="start-btn" id="startBtn">
+      <svg id="startIcon" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+        <polygon points="5 3 19 12 5 21 5 3"/>
+      </svg>
+      <span id="startText">Start Translation</span>
+    </button>
 
     <!-- Test Translation -->
     <section class="card">
       <label class="card-title">Test Translation</label>
       <textarea id="testInput" rows="2" placeholder="Type text to translate..."></textarea>
-      <button class="test-btn" id="testBtn">Translate</button>
+      <div class="test-row">
+        <button class="test-btn" id="testBtn">Translate</button>
+      </div>
       <div class="result" id="testResult"></div>
     </section>
 
     <!-- Model Info -->
-    <section class="card">
-      <label class="card-title">Model</label>
+    <section class="card model-card">
       <div class="info-row">
-        <span class="info-label">Path:</span>
-        <span class="info-value" id="modelPath">—</span>
+        <span class="info-label">Model</span>
+        <span class="info-value" id="modelPath">-</span>
       </div>
       <div class="info-row">
-        <span class="info-label">GPU Layers:</span>
-        <span class="info-value" id="gpuLayers">—</span>
+        <span class="info-label">GPU Layers</span>
+        <span class="info-value" id="gpuLayers">-</span>
       </div>
     </section>
   </div>

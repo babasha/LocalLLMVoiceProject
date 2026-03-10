@@ -1,4 +1,5 @@
 const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 
 // --- State ---
 let state = {
@@ -9,10 +10,14 @@ let state = {
 // --- DOM ---
 const statusBadge = document.getElementById('statusBadge');
 const startBtn = document.getElementById('startBtn');
+const startText = document.getElementById('startText');
 const sourceLang = document.getElementById('sourceLang');
 const targetLang = document.getElementById('targetLang');
 const swapLangs = document.getElementById('swapLangs');
-const deviceList = document.getElementById('deviceList');
+const inputDevice = document.getElementById('inputDevice');
+const outputDevice = document.getElementById('outputDevice');
+const levelBar = document.getElementById('levelBar');
+const levelLabel = document.getElementById('levelLabel');
 const testInput = document.getElementById('testInput');
 const testBtn = document.getElementById('testBtn');
 const testResult = document.getElementById('testResult');
@@ -24,6 +29,8 @@ const modeBtns = document.querySelectorAll('.mode-btn');
 async function init() {
   await refreshStatus();
   await loadDevices();
+  await invoke('start_monitoring');
+  setupMicLevelListener();
 }
 
 async function refreshStatus() {
@@ -32,7 +39,6 @@ async function refreshStatus() {
     state.isRunning = status.is_running;
     state.mode = status.mode;
 
-    // Update UI
     sourceLang.value = status.source_lang;
     targetLang.value = status.target_lang;
     modelPath.textContent = status.model_path;
@@ -49,12 +55,12 @@ function updateRunningUI() {
   if (state.isRunning) {
     statusBadge.textContent = 'Running';
     statusBadge.classList.add('running');
-    startBtn.textContent = 'Stop';
+    startText.textContent = 'Stop Translation';
     startBtn.classList.add('running');
   } else {
     statusBadge.textContent = 'Stopped';
     statusBadge.classList.remove('running');
-    startBtn.textContent = 'Start';
+    startText.textContent = 'Start Translation';
     startBtn.classList.remove('running');
   }
 }
@@ -68,25 +74,79 @@ function updateModeUI() {
 async function loadDevices() {
   try {
     const devices = await invoke('list_audio_devices');
-    deviceList.innerHTML = '';
 
-    if (devices.length === 0) {
-      deviceList.innerHTML = '<span class="muted">No devices found</span>';
-      return;
-    }
+    // Populate input devices
+    const inputs = devices.filter(d => d.is_input);
+    const outputs = devices.filter(d => !d.is_input);
 
-    devices.forEach(dev => {
-      const el = document.createElement('div');
-      el.className = 'device-item' + (dev.is_default ? ' default' : '');
-      el.innerHTML = `
-        <span>${dev.name}</span>
-        <span class="device-type ${dev.is_input ? '' : 'output'}">${dev.is_input ? 'IN' : 'OUT'}</span>
-      `;
-      deviceList.appendChild(el);
+    inputDevice.innerHTML = '';
+    inputs.forEach(dev => {
+      const opt = document.createElement('option');
+      opt.value = dev.name;
+      opt.textContent = dev.name + (dev.is_default ? ' (Default)' : '');
+      opt.selected = dev.is_selected;
+      inputDevice.appendChild(opt);
+    });
+
+    outputDevice.innerHTML = '';
+    outputs.forEach(dev => {
+      const opt = document.createElement('option');
+      opt.value = dev.name;
+      opt.textContent = dev.name + (dev.is_default ? ' (Default)' : '');
+      opt.selected = dev.is_selected;
+      outputDevice.appendChild(opt);
     });
   } catch (e) {
-    deviceList.innerHTML = '<span class="muted">Failed to load devices</span>';
+    console.error('Failed to load devices:', e);
   }
+}
+
+// --- Mic Level Meter with smoothing ---
+let smoothLevel = 0;
+let peakHold = 0;
+let peakDecay = 0;
+
+function setupMicLevelListener() {
+  // Listen for events from backend
+  listen('mic-level', (event) => {
+    const level = event.payload;
+    updateLevelMeter(level);
+  });
+
+  // Also poll as fallback every 50ms
+  setInterval(async () => {
+    try {
+      const level = await invoke('get_mic_level');
+      if (level > 0) updateLevelMeter(level);
+    } catch (e) {}
+  }, 50);
+
+  // Decay animation
+  setInterval(() => {
+    if (smoothLevel > 0.001) {
+      smoothLevel *= 0.85;
+      renderLevel(smoothLevel);
+    }
+  }, 30);
+}
+
+function updateLevelMeter(level) {
+  // Fast attack, slow release
+  if (level > smoothLevel) {
+    smoothLevel = level;
+  } else {
+    smoothLevel = smoothLevel * 0.7 + level * 0.3;
+  }
+  renderLevel(smoothLevel);
+}
+
+function renderLevel(level) {
+  const pct = Math.min(level * 100, 100);
+  levelBar.style.width = pct + '%';
+
+  // dB display
+  const db = level > 0.001 ? Math.max(-60, 20 * Math.log10(level)) : -60;
+  levelLabel.textContent = db.toFixed(0) + ' dB';
 }
 
 // --- Events ---
@@ -112,6 +172,22 @@ modeBtns.forEach(btn => {
       console.error('Set mode failed:', e);
     }
   });
+});
+
+inputDevice.addEventListener('change', async () => {
+  try {
+    await invoke('select_input_device', { name: inputDevice.value });
+  } catch (e) {
+    console.error('Select input device failed:', e);
+  }
+});
+
+outputDevice.addEventListener('change', async () => {
+  try {
+    await invoke('select_output_device', { name: outputDevice.value });
+  } catch (e) {
+    console.error('Select output device failed:', e);
+  }
 });
 
 sourceLang.addEventListener('change', async () => {
