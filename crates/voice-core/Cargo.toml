@@ -1,0 +1,56 @@
+[package]
+name = "voice-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core library for real-time voice translation (RU↔EN) with native GPU acceleration"
+
+[lib]
+name = "voice_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "voice-translator"
+path = "src/main.rs"
+
+[dependencies]
+# Audio I/O
+cpal = "0.15"
+
+# Lock-free ring buffer for real-time audio
+rtrb = "0.3"
+
+# Inter-thread messaging
+crossbeam-channel = "0.5"
+
+# Audio resampling
+rubato = "0.16"
+
+# Config
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Ctrl+C handling
+ctrlc = "3.4"
+
+# Utilities
+hound = "3.5"
+
+# LLM inference (Qwen3.5-4B via llama.cpp)
+llama-cpp-2 = { version = "0.1", features = ["cuda"] }
+
+# UTF-8 decoding for token output
+encoding_rs = "0.8"
+
+[dev-dependencies]
+assert_no_alloc = "1.1"

@@ -33,16 +33,18 @@ model_path = "models/ggml-large-v3-turbo-q8.bin"
 language = ""
 
 [translation]
-# Path to Qwen3.5-2B GGUF model
-model_path = "models/Qwen3.5-2B-Q4_K_M.gguf"
-# Number of GPU layers to offload
+# Path to Qwen3.5-4B GGUF model
+model_path = "models/Qwen3.5-4B-Q4_K_M.gguf"
+# Number of GPU layers to offload (99 = all layers)
 n_gpu_layers = 99
-# Context size
-context_size = 2048
+# Context size (4096 is plenty for translation)
+context_size = 4096
 # Max tokens to generate per translation
 max_tokens = 128
-# Temperature
+# Temperature (low for deterministic translation)
 temperature = 0.1
+# Disable thinking mode for faster translation
+enable_thinking = false
 
 [tts]
 # TTS engine: "kokoro" or "piper"

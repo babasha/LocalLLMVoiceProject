@@ -1,0 +1,38 @@
+{
+  "$schema": "https://raw.githubusercontent.com/niconiahi/tauri-config-schema/main/schema.json",
+  "productName": "Voice Translator",
+  "version": "0.1.0",
+  "identifier": "com.voicetranslator.app",
+  "build": {
+    "frontendDist": "../ui",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Voice Translator",
+        "width": 480,
+        "height": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "center": true,
+        "minWidth": 400,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/icon.png"
+    ]
+  }
+}
