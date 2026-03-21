@@ -49,6 +49,9 @@ hound = "3.5"
 # LLM inference (Qwen3.5-4B via llama.cpp)
 llama-cpp-2 = { version = "0.1", features = ["cuda"] }
 
+# STT inference (GigaAM-v3 via sherpa-onnx)
+sherpa-onnx = "1.12.31"
+
 # UTF-8 decoding for token output
 encoding_rs = "0.8"
 

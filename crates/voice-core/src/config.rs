@@ -40,6 +40,7 @@ pub struct VadConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct SttConfig {
     pub model_path: String,
+    pub tokens_path: String,
     #[serde(default)]
     pub language: String,
 }

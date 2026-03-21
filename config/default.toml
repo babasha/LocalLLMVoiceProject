@@ -27,10 +27,12 @@ silence_duration_ms = 300
 min_speech_duration_ms = 250
 
 [stt]
-# Path to Whisper model
-model_path = "models/ggml-large-v3-turbo-q8.bin"
+# Path to GigaAM-v3 e2e CTC INT8 model (NeMo format, with punctuation)
+model_path = "models/gigaam_v3_e2e_ctc_int8.onnx"
+# Path to tokens vocabulary file
+tokens_path = "models/gigaam_v3_e2e_ctc_tokens.txt"
 # Language hint (empty = auto-detect)
-language = ""
+language = "ru"
 
 [translation]
 # Path to Qwen3.5-4B GGUF model

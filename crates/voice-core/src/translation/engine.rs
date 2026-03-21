@@ -9,6 +9,7 @@ use crate::error::{Result, VoiceTranslatorError};
 use crate::translation::prompt;
 
 use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
@@ -16,7 +17,6 @@ use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
 /// LLM-based translation engine using Qwen3.5-4B via llama.cpp.
-/// Uses CUDA GPU acceleration for fast inference.
 pub struct TranslationEngine {
     config: TranslationConfig,
     backend: Arc<LlamaBackend>,
@@ -37,12 +37,7 @@ impl TranslationEngine {
         info!("Loading model: {}", config.model_path);
         let model =
             LlamaModel::load_from_file(&backend, &config.model_path, &model_params).map_err(
-                |e| {
-                    VoiceTranslatorError::Translation(format!(
-                        "Failed to load model '{}': {e}",
-                        config.model_path
-                    ))
-                },
+                |e| VoiceTranslatorError::Translation(format!("Failed to load model: {e}")),
             )?;
 
         info!(
@@ -58,9 +53,25 @@ impl TranslationEngine {
         })
     }
 
-    /// Translate text from source to target language.
-    pub fn translate(
+    /// Create a persistent context to reuse across multiple translate calls.
+    /// Call this once, then pass the returned context to `translate_with`.
+    pub fn make_context(&self) -> Result<LlamaContext<'_>> {
+        let ctx_size = NonZeroU32::new(self.config.context_size)
+            .unwrap_or(NonZeroU32::new(4096).unwrap());
+        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(ctx_size));
+
+        self.model
+            .new_context(&self.backend, ctx_params)
+            .map_err(|e| {
+                VoiceTranslatorError::Translation(format!("Failed to create context: {e}"))
+            })
+    }
+
+    /// Translate using a pre-created context (no re-allocation between calls).
+    /// Safe to reuse: decodes from position 0 each time, overwriting KV cache entries.
+    pub fn translate_with(
         &self,
+        ctx: &mut LlamaContext<'_>,
         text: &str,
         source_lang: &str,
         target_lang: &str,
@@ -70,30 +81,19 @@ impl TranslationEngine {
             return Ok(String::new());
         }
 
-        // Build chat-style prompt for Qwen3.5
         let full_prompt = self.build_chat_prompt(trimmed, source_lang, target_lang);
         debug!("Prompt: {}", full_prompt);
 
-        // Create context for this inference
-        let ctx_size = NonZeroU32::new(self.config.context_size)
-            .unwrap_or(NonZeroU32::new(4096).unwrap());
-        let ctx_params = LlamaContextParams::default().with_n_ctx(Some(ctx_size));
-
-        let mut ctx = self
+        let tokens = self
             .model
-            .new_context(&self.backend, ctx_params)
+            .str_to_token(&full_prompt, AddBos::Always)
             .map_err(|e| {
-                VoiceTranslatorError::Translation(format!("Failed to create context: {e}"))
+                VoiceTranslatorError::Translation(format!("Tokenization failed: {e}"))
             })?;
-
-        // Tokenize prompt
-        let tokens = self.model.str_to_token(&full_prompt, AddBos::Always).map_err(|e| {
-            VoiceTranslatorError::Translation(format!("Tokenization failed: {e}"))
-        })?;
 
         debug!("Prompt tokens: {}", tokens.len());
 
-        // Feed prompt tokens into context
+        // Decode prompt starting at position 0 — overwrites previous KV cache entries
         let mut batch = LlamaBatch::new(self.config.context_size as usize, 1);
         let last_idx = (tokens.len() - 1) as i32;
         for (i, token) in (0_i32..).zip(tokens.iter()) {
@@ -106,7 +106,6 @@ impl TranslationEngine {
             VoiceTranslatorError::Translation(format!("Prompt decode failed: {e}"))
         })?;
 
-        // Set up sampler
         let mut sampler = LlamaSampler::chain_simple([
             LlamaSampler::temp(self.config.temperature),
             LlamaSampler::top_k(20),
@@ -114,34 +113,32 @@ impl TranslationEngine {
             LlamaSampler::dist(42),
         ]);
 
-        // Generate tokens
         let mut output = String::new();
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut n_cur = batch.n_tokens();
         let max_tokens = self.config.max_tokens as i32;
 
         for _ in 0..max_tokens {
-            let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+            let token = sampler.sample(ctx, batch.n_tokens() - 1);
             sampler.accept(token);
 
-            // Check for end of generation
             if self.model.is_eog_token(token) {
                 break;
             }
 
-            // Decode token to text
-            let piece = self.model.token_to_piece(token, &mut decoder, true, None).map_err(|e| {
-                VoiceTranslatorError::Translation(format!("Token decode failed: {e}"))
-            })?;
+            let piece = self
+                .model
+                .token_to_piece(token, &mut decoder, true, None)
+                .map_err(|e| {
+                    VoiceTranslatorError::Translation(format!("Token decode failed: {e}"))
+                })?;
 
-            // Stop if we hit thinking tags (shouldn't happen with thinking disabled)
             if output.contains("<think>") || piece.contains("<|im_end|>") {
                 break;
             }
 
             output.push_str(&piece);
 
-            // Prepare next token
             batch.clear();
             batch.add(token, n_cur, &[0], true).map_err(|e| {
                 VoiceTranslatorError::Translation(format!("Batch add failed: {e}"))
@@ -159,7 +156,6 @@ impl TranslationEngine {
         Ok(result)
     }
 
-    /// Build a ChatML-formatted prompt for Qwen3.5.
     fn build_chat_prompt(&self, text: &str, source_lang: &str, target_lang: &str) -> String {
         let system = prompt::system_prompt(source_lang, target_lang);
         let user = prompt::build_translation_prompt(text, source_lang, target_lang);
@@ -171,7 +167,6 @@ impl TranslationEngine {
                  <|im_start|>assistant\n"
             )
         } else {
-            // Disable thinking by adding /no_think prefix
             format!(
                 "<|im_start|>system\n{system}<|im_end|>\n\
                  <|im_start|>user\n{user}<|im_end|>\n\
@@ -180,11 +175,9 @@ impl TranslationEngine {
         }
     }
 
-    /// Clean up model output — remove tags, extra whitespace, quotes.
     fn clean_output(&self, raw: &str) -> String {
         let mut s = raw.to_string();
 
-        // Remove any thinking block that leaked through
         if let Some(start) = s.find("<think>") {
             if let Some(end) = s.find("</think>") {
                 s = format!("{}{}", &s[..start], &s[end + 8..]);
@@ -193,12 +186,11 @@ impl TranslationEngine {
             }
         }
 
-        // Remove special tokens
-        s = s.replace("<|im_end|>", "")
+        s = s
+            .replace("<|im_end|>", "")
             .replace("<|im_start|>", "")
             .replace("<|endoftext|>", "");
 
-        // Trim surrounding quotes and whitespace
         let trimmed = s.trim();
         let trimmed = trimmed.strip_prefix('"').unwrap_or(trimmed);
         let trimmed = trimmed.strip_suffix('"').unwrap_or(trimmed);

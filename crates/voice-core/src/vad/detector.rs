@@ -17,6 +17,8 @@ pub struct VadDetector {
     silent_frames: u32,
     /// Samples per VAD frame (typically 30ms = 480 samples at 16kHz)
     frame_size: usize,
+    /// Max samples before force-flushing (30 seconds)
+    max_segment_samples: usize,
 }
 
 impl VadDetector {
@@ -28,13 +30,16 @@ impl VadDetector {
             config.threshold, config.silence_duration_ms, frame_size
         );
 
+        let max_segment_samples = sample_rate as usize * 4; // 4s hard limit for near-realtime
+
         Ok(VadDetector {
             config: config.clone(),
             sample_rate,
-            speech_buffer: Vec::with_capacity(sample_rate as usize * 10), // up to 10s
+            speech_buffer: Vec::with_capacity(sample_rate as usize * 10),
             is_speaking: false,
             silent_frames: 0,
             frame_size,
+            max_segment_samples,
         })
     }
 
@@ -51,7 +56,8 @@ impl VadDetector {
         // Process in frames
         for chunk in samples.chunks(self.frame_size) {
             let energy = rms_energy(chunk);
-            let is_speech = energy > self.config.threshold * 0.01; // rough energy threshold
+            // threshold=0.5 in config → effective energy ~0.025 (filters room noise ~0.005)
+            let is_speech = energy > self.config.threshold * 0.05;
 
             if is_speech {
                 self.silent_frames = 0;
@@ -61,10 +67,9 @@ impl VadDetector {
                 self.speech_buffer.extend_from_slice(chunk);
             } else if self.is_speaking {
                 self.silent_frames += 1;
-                self.speech_buffer.extend_from_slice(chunk); // include trailing silence
+                self.speech_buffer.extend_from_slice(chunk);
 
                 if self.silent_frames >= silence_frames_threshold {
-                    // End of speech
                     if self.speech_buffer.len() >= min_speech_samples {
                         let segment =
                             SpeechSegment::new(self.speech_buffer.drain(..).collect(), self.sample_rate);
@@ -75,6 +80,15 @@ impl VadDetector {
                     self.is_speaking = false;
                     self.silent_frames = 0;
                 }
+            }
+
+            // Hard limit: force flush if segment grew too long
+            if self.speech_buffer.len() >= self.max_segment_samples {
+                let segment =
+                    SpeechSegment::new(self.speech_buffer.drain(..).collect(), self.sample_rate);
+                segments.push(segment);
+                self.is_speaking = false;
+                self.silent_frames = 0;
             }
         }
 
