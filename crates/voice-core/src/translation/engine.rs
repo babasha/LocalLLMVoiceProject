@@ -27,9 +27,11 @@ impl TranslationEngine {
     /// Initialize the translation engine — loads the GGUF model into GPU.
     pub fn new(config: &TranslationConfig) -> Result<Self> {
         info!("Initializing LLM backend...");
-        let backend = LlamaBackend::init().map_err(|e| {
+        let mut backend = LlamaBackend::init().map_err(|e| {
             VoiceTranslatorError::Translation(format!("Failed to init llama backend: {e}"))
         })?;
+        // Suppress llama.cpp/ggml internal log spam (CUDA graph warmup, etc.)
+        backend.void_logs();
 
         let model_params = pin!(LlamaModelParams::default()
             .with_n_gpu_layers(config.n_gpu_layers));
@@ -80,6 +82,10 @@ impl TranslationEngine {
         if trimmed.is_empty() {
             return Ok(String::new());
         }
+
+        // Clear KV cache before each new prompt — required for M-RoPE (Qwen3.5):
+        // positions must be monotonically increasing, so we reset to 0 each call.
+        ctx.clear_kv_cache();
 
         let full_prompt = self.build_chat_prompt(trimmed, source_lang, target_lang);
         debug!("Prompt: {}", full_prompt);

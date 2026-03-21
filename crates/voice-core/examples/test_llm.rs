@@ -8,7 +8,8 @@ fn main() {
     match TranslationEngine::new(&config.translation) {
         Ok(engine) => {
             println!("Model loaded!");
-            match engine.translate("Привет мир", "ru", "en") {
+            let mut ctx = engine.make_context().expect("Failed to create context");
+            match engine.translate_with(&mut ctx, "Привет мир", "ru", "en") {
                 Ok(result) => println!("Translation: '{}'", result),
                 Err(e) => println!("Translation error: {}", e),
             }

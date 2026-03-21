@@ -372,8 +372,9 @@ fn test_translation(state: State<AppState>, request: TranslateRequest) -> Result
     let engine = voice_core::translation::engine::TranslationEngine::new(&config.translation)
         .map_err(|e| format!("Failed to init engine: {e}"))?;
 
+    let mut ctx = engine.make_context().map_err(|e| format!("Failed to create context: {e}"))?;
     let result = engine
-        .translate(&request.text, &request.source_lang, &request.target_lang)
+        .translate_with(&mut ctx, &request.text, &request.source_lang, &request.target_lang)
         .map_err(|e| format!("Translation failed: {e}"))?;
 
     Ok(TranslateResponse {

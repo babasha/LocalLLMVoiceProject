@@ -22,7 +22,7 @@ target = "en"
 # Speech detection threshold (0.0 - 1.0)
 threshold = 0.5
 # Silence duration (ms) to mark end of speech
-silence_duration_ms = 300
+silence_duration_ms = 2000
 # Minimum speech duration (ms) to process
 min_speech_duration_ms = 250
 
