@@ -32,9 +32,16 @@ pub struct LanguageConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct VadConfig {
+    pub model_path: String,
     pub threshold: f32,
     pub silence_duration_ms: u32,
     pub min_speech_duration_ms: u32,
+    #[serde(default = "default_max_speech")]
+    pub max_speech_duration_ms: u32,
+}
+
+fn default_max_speech() -> u32 {
+    15000
 }
 
 #[derive(Debug, Deserialize, Clone)]

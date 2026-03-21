@@ -19,12 +19,16 @@ source = "ru"
 target = "en"
 
 [vad]
+# Path to Silero VAD v5 ONNX model
+model_path = "models/silero_vad.onnx"
 # Speech detection threshold (0.0 - 1.0)
 threshold = 0.5
 # Silence duration (ms) to mark end of speech
-silence_duration_ms = 2000
+silence_duration_ms = 1500
 # Minimum speech duration (ms) to process
-min_speech_duration_ms = 250
+min_speech_duration_ms = 300
+# Maximum speech duration (ms) before force-flush
+max_speech_duration_ms = 15000
 
 [stt]
 # Path to GigaAM-v3 e2e CTC INT8 model (NeMo format, with punctuation)

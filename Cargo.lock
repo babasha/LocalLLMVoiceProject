@@ -4728,6 +4728,7 @@ dependencies = [
  "ctrlc",
  "encoding_rs",
  "hound",
+ "libc",
  "llama-cpp-2",
  "rtrb",
  "rubato",

@@ -6,28 +6,23 @@ use std::time::Duration;
 use cpal::traits::DeviceTrait;
 use crossbeam_channel::bounded;
 use rtrb::RingBuffer;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::audio::{capture, device, playback};
 use crate::config::AppConfig;
 use crate::error::{Result, VoiceTranslatorError};
-use crate::pipeline::messages::*;
 use crate::pipeline::shutdown::ShutdownSignal;
 use crate::stt::gigaam::GigaAmStt;
 use crate::translation::engine::TranslationEngine;
+use crate::vad::detector::VadDetector;
 
-/// Pipeline mode determines which stages are active.
 #[derive(Debug, Clone, Copy)]
 pub enum PipelineMode {
-    /// Audio passthrough: mic → speaker (Phase 1 testing)
     Passthrough,
-    /// VAD + STT only: mic → text in console (Phase 2 testing)
     SttOnly,
-    /// Full pipeline: mic → VAD → STT → Translation → TTS → speaker
     Full,
 }
 
-/// Orchestrates the full translation pipeline with 6 threads.
 pub struct Orchestrator {
     config: AppConfig,
     mode: PipelineMode,
@@ -37,14 +32,9 @@ pub struct Orchestrator {
 impl Orchestrator {
     pub fn new(config: AppConfig, mode: PipelineMode) -> Self {
         let shutdown = ShutdownSignal::new();
-        Orchestrator {
-            config,
-            mode,
-            shutdown,
-        }
+        Orchestrator { config, mode, shutdown }
     }
 
-    /// Run the pipeline. Blocks until Ctrl+C or error.
     pub fn run(&self) -> Result<()> {
         match self.mode {
             PipelineMode::Passthrough => self.run_passthrough(),
@@ -53,525 +43,368 @@ impl Orchestrator {
         }
     }
 
-    /// Phase 1: Simple mic → speaker passthrough via rtrb ring buffer.
     fn run_passthrough(&self) -> Result<()> {
         info!("Starting passthrough mode (mic → speaker)");
+        let sr = self.config.audio.sample_rate;
+        let ch = self.config.audio.channels;
+        let cap = self.config.audio.ring_buffer_capacity;
 
-        let sample_rate = self.config.audio.sample_rate;
-        let channels = self.config.audio.channels;
-        let capacity = self.config.audio.ring_buffer_capacity;
+        let (prod, cons) = RingBuffer::<f32>::new(cap);
+        let in_dev = device::default_input_device()?;
+        let out_dev = device::default_output_device()?;
+        info!("Input:  {}", in_dev.name().unwrap_or_default());
+        info!("Output: {}", out_dev.name().unwrap_or_default());
 
-        // Create ring buffer
-        let (producer, consumer) = RingBuffer::<f32>::new(capacity);
-
-        // Get devices
-        let input_device = device::default_input_device()?;
-        let output_device = device::default_output_device()?;
-
-        info!(
-            "Input:  {}",
-            input_device.name().unwrap_or_default()
-        );
-        info!(
-            "Output: {}",
-            output_device.name().unwrap_or_default()
-        );
-
-        // Start streams
-        let _input_stream =
-            capture::start_capture(&input_device, sample_rate, channels, producer)?;
-        let _output_stream =
-            playback::start_playback(&output_device, sample_rate, channels, consumer)?;
+        let _in_stream = capture::start_capture(&in_dev, sr, ch, prod)?;
+        let _out_stream = playback::start_playback(&out_dev, sr, ch, cons)?;
 
         info!("Passthrough active. Press Ctrl+C to stop.");
-
-        // Block until shutdown
         self.wait_for_shutdown();
-
         info!("Passthrough stopped.");
         Ok(())
     }
 
-    /// Phase 2: Streaming STT — partial results update in real-time like voice assistants.
     fn run_stt_only(&self) -> Result<()> {
-        info!("Starting streaming STT mode (mic → text)");
-
+        info!("Starting streaming STT mode");
         let sample_rate = self.config.audio.sample_rate;
         let channels = self.config.audio.channels;
-        // Large ring buffer: 8 seconds to absorb latency during transcription
-        let capacity = sample_rate as usize * 8;
 
-        let (producer, mut consumer) = RingBuffer::<f32>::new(capacity);
-
+        let (producer, mut consumer) = RingBuffer::<f32>::new(sample_rate as usize * 8);
         let input_device = device::default_input_device()?;
-        let _input_stream =
-            capture::start_capture(&input_device, sample_rate, channels, producer)?;
+        let _input_stream = capture::start_capture(&input_device, sample_rate, channels, producer)?;
 
-        let shutdown_stt = self.shutdown.clone();
-        let stt_config = self.config.stt.clone();
-        let vad_threshold = self.config.vad.threshold;
-        let silence_duration_ms = self.config.vad.silence_duration_ms;
+        let shutdown = self.shutdown.clone();
+        let stt_cfg = self.config.stt.clone();
+        let vad_cfg = self.config.vad.clone();
 
-        let _stt_handle = thread::Builder::new()
-            .name("stt".into())
-            .spawn(move || {
-                let stt = match GigaAmStt::new(&stt_config) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!("Failed to initialize GigaAM STT: {}", e);
-                        return;
+        let _handle = thread::Builder::new().name("stt".into()).spawn(move || {
+            let stt = match GigaAmStt::new(&stt_cfg) {
+                Ok(s) => s, Err(e) => { error!("STT: {e}"); return; }
+            };
+            let vad = match VadDetector::new(&vad_cfg, sample_rate) {
+                Ok(v) => v, Err(e) => { error!("VAD: {e}"); return; }
+            };
+            info!("STT + Silero VAD ready");
+            println!("--- говорите ---");
+
+            let partial_every = sample_rate as usize;
+            let chunk = 512usize;
+            let mut tmp = vec![0.0f32; chunk];
+            let mut pbuf: Vec<f32> = Vec::new();
+            let mut since_partial = 0usize;
+
+            while !shutdown.is_shutdown() {
+                let avail = consumer.slots();
+                if avail < chunk { thread::sleep(Duration::from_millis(5)); continue; }
+                let n = avail.min(chunk);
+                for i in 0..n { tmp[i] = consumer.pop().unwrap_or(0.0); }
+                let frame = &tmp[..n];
+                vad.accept_waveform(frame);
+
+                while let Some(seg) = vad.pop_segment() {
+                    if let Ok(t) = stt.transcribe(&seg) {
+                        if !t.is_empty() { println!("\r\x1B[2K{t}"); }
+                        else { print!("\r\x1B[2K"); std::io::stdout().flush().ok(); }
                     }
-                };
-                info!("STT engine ready — streaming mode");
-                println!("--- говорите ---");
+                    pbuf.clear(); since_partial = 0;
+                }
 
-                // Energy threshold: same formula as VAD detector
-                let energy_threshold = vad_threshold * 0.05;
-                // How many samples of new speech before we run a partial transcription
-                let partial_every = sample_rate as usize; // ~1 second
-                // Adaptive silence: base from config, extended for longer utterances
-                let silence_base = (sample_rate as f32 * silence_duration_ms as f32 / 1000.0) as usize;
-                let silence_long = sample_rate as usize * 4; // 4s for long utterances
-                let long_utterance_threshold = sample_rate as usize * 3; // 3s of speech = "long"
-
-                let chunk = 480usize; // 30ms frame
-                let mut tmp = vec![0.0f32; chunk];
-
-                // Audio accumulated during current utterance
-                let mut utterance: Vec<f32> = Vec::new();
-                let mut samples_since_partial = 0usize;
-                let mut silent_samples = 0usize;
-                let mut in_speech = false;
-
-                while !shutdown_stt.is_shutdown() {
-                    let available = consumer.slots();
-                    if available < chunk {
-                        thread::sleep(Duration::from_millis(5));
-                        continue;
-                    }
-                    let to_read = available.min(chunk);
-                    for i in 0..to_read {
-                        tmp[i] = consumer.pop().unwrap_or(0.0);
-                    }
-                    let frame = &tmp[..to_read];
-                    let energy = rms_energy(frame);
-                    let is_speech = energy > energy_threshold;
-
-                    if is_speech {
-                        if !in_speech {
-                            in_speech = true;
+                if vad.is_speech() {
+                    pbuf.extend_from_slice(frame);
+                    since_partial += n;
+                    if since_partial >= partial_every && pbuf.len() > sample_rate as usize / 2 {
+                        if let Ok(t) = stt.transcribe(&pbuf) {
+                            if !t.is_empty() { print!("\r\x1B[2K{t}"); std::io::stdout().flush().ok(); }
                         }
-                        silent_samples = 0;
-                        utterance.extend_from_slice(frame);
-                        samples_since_partial += to_read;
-
-                        // Partial transcription every ~1 second of new speech
-                        if samples_since_partial >= partial_every && utterance.len() > sample_rate as usize / 2 {
-                            if let Ok(text) = stt.transcribe(&utterance) {
-                                if !text.is_empty() {
-                                    print!("\r\x1B[2K{}", text);
-                                    std::io::stdout().flush().ok();
-                                }
-                            }
-                            samples_since_partial = 0;
-                        }
-
-                        // Force-flush after 15 seconds (for noisy environments)
-                        if utterance.len() >= sample_rate as usize * 15 {
-                            if let Ok(text) = stt.transcribe(&utterance) {
-                                if !text.is_empty() {
-                                    println!("\r\x1B[2K{}", text);
-                                }
-                            }
-                            utterance.clear();
-                            samples_since_partial = 0;
-                            in_speech = false;
-                        }
-                    } else if in_speech {
-                        utterance.extend_from_slice(frame);
-                        silent_samples += to_read;
-
-                        // Adaptive: long utterances get more patience for pauses
-                        let effective_silence = if utterance.len() > long_utterance_threshold {
-                            silence_long
-                        } else {
-                            silence_base
-                        };
-
-                        if silent_samples >= effective_silence {
-                            // End of utterance — final transcription
-                            if let Ok(text) = stt.transcribe(&utterance) {
-                                if !text.is_empty() {
-                                    println!("\r\x1B[2K{}", text);
-                                } else {
-                                    print!("\r\x1B[2K");
-                                    std::io::stdout().flush().ok();
-                                }
-                            }
-                            utterance.clear();
-                            samples_since_partial = 0;
-                            silent_samples = 0;
-                            in_speech = false;
-                        }
+                        since_partial = 0;
                     }
                 }
-            })
-            .map_err(|e| {
-                VoiceTranslatorError::Pipeline(format!("Failed to spawn STT thread: {}", e))
-            })?;
+            }
+        }).map_err(|e| VoiceTranslatorError::Pipeline(format!("STT thread: {e}")))?;
 
-        info!("Streaming STT active. Press Ctrl+C to stop.");
+        info!("STT active. Ctrl+C to stop.");
         self.wait_for_shutdown();
-
-        info!("STT-only mode stopped.");
         Ok(())
     }
 
-    /// Full pipeline: streaming STT → parallel streaming translation → console output.
+    /// Full pipeline: mic → Silero VAD → GigaAM STT → Qwen translation → console.
+    ///
+    /// Display: two lines, [RU] and [EN], updating in real-time.
+    /// Each line truncated to terminal width to prevent wrapping artifacts.
     fn run_full(&self) -> Result<()> {
-        info!("Starting full pipeline: STT + streaming Translation");
-
+        info!("Starting full pipeline");
         let sample_rate = self.config.audio.sample_rate;
         let channels = self.config.audio.channels;
-        let capacity = sample_rate as usize * 8;
 
-        let (producer, mut consumer) = RingBuffer::<f32>::new(capacity);
+        let (producer, mut consumer) = RingBuffer::<f32>::new(sample_rate as usize * 8);
         let input_device = device::default_input_device()?;
-        let _input_stream =
-            capture::start_capture(&input_device, sample_rate, channels, producer)?;
+        let _input_stream = capture::start_capture(&input_device, sample_rate, channels, producer)?;
 
-        // Channel: STT → Translation (partials + finals)
         let (stt_tx, stt_rx) = bounded::<SttEvent>(16);
+        let display = Arc::new(Mutex::new(TwoLineDisplay::new()));
 
-        // Shared two-line display
-        let display = Arc::new(Mutex::new(LiveDisplay::new()));
-
-        // STT thread
+        // --- STT thread ---
         let shutdown_stt = self.shutdown.clone();
-        let stt_config = self.config.stt.clone();
-        let vad_threshold = self.config.vad.threshold;
-        let silence_duration_ms = self.config.vad.silence_duration_ms;
-        let source_lang_stt = self.config.languages.source.clone();
-        let display_stt = display.clone();
+        let stt_cfg = self.config.stt.clone();
+        let vad_cfg = self.config.vad.clone();
+        let src_tag = self.config.languages.source.to_uppercase();
+        let d1 = display.clone();
 
-        let _stt_handle = thread::Builder::new()
-            .name("stt".into())
-            .spawn(move || {
-                let stt = match GigaAmStt::new(&stt_config) {
-                    Ok(s) => s,
-                    Err(e) => { error!("STT init failed: {}", e); return; }
-                };
-                info!("STT engine ready");
+        let _stt = thread::Builder::new().name("stt".into()).spawn(move || {
+            let stt = match GigaAmStt::new(&stt_cfg) {
+                Ok(s) => s, Err(e) => { error!("STT: {e}"); return; }
+            };
+            let vad = match VadDetector::new(&vad_cfg, sample_rate) {
+                Ok(v) => v, Err(e) => { error!("VAD: {e}"); return; }
+            };
+            info!("STT + Silero VAD ready");
 
-                let energy_threshold = vad_threshold * 0.05;
-                let partial_every = sample_rate as usize;
-                let silence_base = (sample_rate as f32 * silence_duration_ms as f32 / 1000.0) as usize;
-                let silence_long = sample_rate as usize * 4;
-                let long_utterance_threshold = sample_rate as usize * 3;
-                let force_flush_samples = sample_rate as usize * 15;
+            let partial_every = sample_rate as usize;
+            let chunk = 512usize;
+            let mut tmp = vec![0.0f32; chunk];
+            let mut pbuf: Vec<f32> = Vec::new();
+            let mut since_partial = 0usize;
+            let mut last_text = String::new();
 
-                let chunk = 480usize;
-                let mut tmp = vec![0.0f32; chunk];
-                let mut utterance: Vec<f32> = Vec::new();
-                let mut samples_since_partial = 0usize;
-                let mut silent_samples = 0usize;
-                let mut in_speech = false;
-                let mut last_partial_text = String::new();
+            while !shutdown_stt.is_shutdown() {
+                let avail = consumer.slots();
+                if avail < chunk { thread::sleep(Duration::from_millis(5)); continue; }
+                let n = avail.min(chunk);
+                for i in 0..n { tmp[i] = consumer.pop().unwrap_or(0.0); }
+                let frame = &tmp[..n];
+                vad.accept_waveform(frame);
 
-                while !shutdown_stt.is_shutdown() {
-                    let available = consumer.slots();
-                    if available < chunk {
-                        thread::sleep(Duration::from_millis(5));
-                        continue;
+                // Completed segments → final
+                while let Some(seg) = vad.pop_segment() {
+                    if let Ok(text) = stt.transcribe(&seg) {
+                        if !text.is_empty() {
+                            d1.lock().unwrap().update_ru(&format!("[{src_tag}] {text}"));
+                            let _ = stt_tx.send(SttEvent::Final(text));
+                        }
                     }
-                    let to_read = available.min(chunk);
-                    for i in 0..to_read { tmp[i] = consumer.pop().unwrap_or(0.0); }
-                    let frame = &tmp[..to_read];
-                    let is_speech = rms_energy(frame) > energy_threshold;
+                    pbuf.clear();
+                    since_partial = 0;
+                    last_text.clear();
+                }
 
-                    if is_speech {
-                        if !in_speech { in_speech = true; }
-                        silent_samples = 0;
-                        utterance.extend_from_slice(frame);
-                        samples_since_partial += to_read;
-
-                        // Partial transcription every ~1 second
-                        if samples_since_partial >= partial_every && utterance.len() > sample_rate as usize / 2 {
-                            if let Ok(text) = stt.transcribe(&utterance) {
-                                if !text.is_empty() {
-                                    let ru = format!("[{}] {}", source_lang_stt.to_uppercase(), text);
-                                    display_stt.lock().unwrap().update_ru(&ru);
-                                    // Only send to translation if text actually changed
-                                    if text != last_partial_text {
-                                        last_partial_text = text.clone();
-                                        let _ = stt_tx.try_send(SttEvent::Partial(text));
-                                    }
+                // Partials while speaking
+                if vad.is_speech() {
+                    pbuf.extend_from_slice(frame);
+                    since_partial += n;
+                    if since_partial >= partial_every && pbuf.len() > sample_rate as usize / 2 {
+                        if let Ok(text) = stt.transcribe(&pbuf) {
+                            if !text.is_empty() {
+                                d1.lock().unwrap().update_ru(&format!("[{src_tag}] {text}"));
+                                if text != last_text {
+                                    last_text = text.clone();
+                                    let _ = stt_tx.try_send(SttEvent::Partial(text));
                                 }
                             }
-                            samples_since_partial = 0;
                         }
-
-                        // Force-flush if speech is too long
-                        if utterance.len() >= force_flush_samples {
-                            if let Ok(text) = stt.transcribe(&utterance) {
-                                if !text.is_empty() {
-                                    let ru = format!("[{}] {}", source_lang_stt.to_uppercase(), text);
-                                    display_stt.lock().unwrap().finalize_ru(&ru);
-                                    let _ = stt_tx.send(SttEvent::Final(text));
-                                }
-                            }
-                            utterance.clear();
-                            samples_since_partial = 0;
-                            last_partial_text.clear();
-                            in_speech = false;
-                        }
-                    } else if in_speech {
-                        utterance.extend_from_slice(frame);
-                        silent_samples += to_read;
-
-                        let effective_silence = if utterance.len() > long_utterance_threshold {
-                            silence_long
-                        } else {
-                            silence_base
-                        };
-
-                        if silent_samples >= effective_silence {
-                            if let Ok(text) = stt.transcribe(&utterance) {
-                                if !text.is_empty() {
-                                    let ru = format!("[{}] {}", source_lang_stt.to_uppercase(), text);
-                                    display_stt.lock().unwrap().finalize_ru(&ru);
-                                    let _ = stt_tx.send(SttEvent::Final(text));
-                                } else {
-                                    display_stt.lock().unwrap().clear_partial();
-                                }
-                            }
-                            utterance.clear();
-                            samples_since_partial = 0;
-                            last_partial_text.clear();
-                            silent_samples = 0;
-                            in_speech = false;
-                        }
+                        since_partial = 0;
                     }
                 }
-            })
-            .map_err(|e| VoiceTranslatorError::Pipeline(format!("Failed to spawn STT thread: {e}")))?;
+            }
+            vad.flush();
+            while let Some(seg) = vad.pop_segment() {
+                if let Ok(text) = stt.transcribe(&seg) {
+                    if !text.is_empty() { let _ = stt_tx.send(SttEvent::Final(text)); }
+                }
+            }
+        }).map_err(|e| VoiceTranslatorError::Pipeline(format!("STT thread: {e}")))?;
 
-        // Translation thread — processes both partials and finals
-        let shutdown_trans = self.shutdown.clone();
-        let translation_config = self.config.translation.clone();
-        let source_lang = self.config.languages.source.clone();
-        let target_lang = self.config.languages.target.clone();
-        let display_trans = display.clone();
+        // --- Translation thread ---
+        let shutdown_tr = self.shutdown.clone();
+        let tr_cfg = self.config.translation.clone();
+        let src_lang = self.config.languages.source.clone();
+        let tgt_lang = self.config.languages.target.clone();
+        let d2 = display.clone();
 
-        let _translation_handle = thread::Builder::new()
-            .name("translation".into())
-            .spawn(move || {
-                let engine = match TranslationEngine::new(&translation_config) {
+        let _tr = thread::Builder::new().name("translation".into()).spawn(move || {
+            let engine = match TranslationEngine::new(&tr_cfg) {
+                Ok(e) => e, Err(e) => { error!("Translation: {e}"); return; }
+            };
+            let mut ctx = match engine.make_context() {
+                Ok(c) => c, Err(e) => { error!("Context: {e}"); return; }
+            };
+            info!("Translation engine ready");
+            let tag = tgt_lang.to_uppercase();
+
+            while !shutdown_tr.is_shutdown() {
+                let ev = match stt_rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(e) => e,
-                    Err(e) => { error!("Translation engine init failed: {}", e); return; }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                    Err(_) => break,
                 };
+                // Drain to latest
+                let mut latest = ev;
+                while let Ok(newer) = stt_rx.try_recv() { latest = newer; }
 
-                let mut ctx = match engine.make_context() {
-                    Ok(c) => c,
-                    Err(e) => { error!("Failed to create translation context: {}", e); return; }
-                };
-
-                info!("Translation engine ready (streaming mode)");
-                let tag = target_lang.to_uppercase();
-
-                while !shutdown_trans.is_shutdown() {
-                    // Wait for next event
-                    let event = match stt_rx.recv_timeout(Duration::from_millis(100)) {
-                        Ok(e) => e,
-                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                    };
-
-                    // Drain channel to get the latest event (skip stale partials)
-                    let mut latest = event;
-                    while let Ok(newer) = stt_rx.try_recv() {
-                        latest = newer;
-                    }
-
-                    match latest {
-                        SttEvent::Partial(text) if text.len() > 2 => {
-                            match engine.translate_with(&mut ctx, &text, &source_lang, &target_lang) {
-                                Ok(translated) if !translated.is_empty() => {
-                                    let en = format!("[{}] {}", tag, translated);
-                                    display_trans.lock().unwrap().update_en(&en);
-                                }
-                                _ => {}
+                match latest {
+                    SttEvent::Partial(text) if text.len() > 2 => {
+                        if let Ok(tr) = engine.translate_with(&mut ctx, &text, &src_lang, &tgt_lang) {
+                            if !tr.is_empty() {
+                                d2.lock().unwrap().update_en(&format!("[{tag}] {tr}"));
                             }
                         }
-                        SttEvent::Final(text) if text.len() > 2 => {
-                            info!("Translating final: '{}'", text);
-                            match engine.translate_with(&mut ctx, &text, &source_lang, &target_lang) {
-                                Ok(translated) if !translated.is_empty() => {
-                                    let en = format!("[{}] {}", tag, translated);
-                                    display_trans.lock().unwrap().finalize_en(&en);
-                                }
-                                Ok(_) => {
-                                    display_trans.lock().unwrap().finalize_empty();
-                                }
-                                Err(e) => {
-                                    error!("Translation error: {}", e);
-                                    display_trans.lock().unwrap().finalize_empty();
-                                }
-                            }
-                        }
-                        _ => {} // skip very short noise artifacts
                     }
+                    SttEvent::Final(text) if text.len() > 2 => {
+                        debug!("Translating final: '{text}'");
+                        match engine.translate_with(&mut ctx, &text, &src_lang, &tgt_lang) {
+                            Ok(tr) if !tr.is_empty() => {
+                                d2.lock().unwrap().commit(&format!("[{tag}] {tr}"));
+                            }
+                            _ => { d2.lock().unwrap().commit_ru_only(); }
+                        }
+                    }
+                    _ => {}
                 }
-            })
-            .map_err(|e| {
-                VoiceTranslatorError::Pipeline(format!("Failed to spawn translation thread: {e}"))
-            })?;
+            }
+        }).map_err(|e| VoiceTranslatorError::Pipeline(format!("Translation thread: {e}")))?;
 
-        info!("Full pipeline active (streaming STT + Translation). Press Ctrl+C to stop.");
+        info!("Pipeline active. Ctrl+C to stop.");
         self.wait_for_shutdown();
-
-        info!("Full pipeline stopped.");
+        info!("Pipeline stopped.");
         Ok(())
     }
 
     fn wait_for_shutdown(&self) {
-        // Wait for Ctrl+C
         let shutdown = self.shutdown.clone();
         let _ = ctrlc::set_handler(move || {
-            info!("Ctrl+C received, shutting down...");
+            info!("Shutting down...");
             shutdown.shutdown();
         });
-
         while !self.shutdown.is_shutdown() {
             thread::sleep(Duration::from_millis(100));
         }
     }
 }
 
-/// Event from STT thread to Translation thread.
+// ---- Types ----
+
 enum SttEvent {
-    /// Intermediate transcription — translate and show as updating [EN] line.
     Partial(String),
-    /// Final transcription (utterance complete) — translate and commit both lines.
     Final(String),
 }
 
-/// Manages two-line terminal display: [RU] and [EN] updating in real-time.
-struct LiveDisplay {
-    ru_text: String,
-    en_text: String,
-    /// How many lines we currently occupy (1 = RU only, 2 = RU + EN)
-    lines: u32,
+// ---- Two-line display ----
+//
+// Always occupies exactly 2 terminal lines when active:
+//   Line 1: [RU] ...
+//   Line 2: [EN] ...  (may be blank)
+//
+// Cursor is ALWAYS at line 2 after any render.
+// On commit, both lines are printed with println (scroll down).
+// Each line is truncated to terminal width to prevent wrapping.
+
+struct TwoLineDisplay {
+    ru: String,
+    en: String,
+    active: bool, // true after first render (we occupy 2 lines)
+    term_width: usize,
 }
 
-impl LiveDisplay {
+impl TwoLineDisplay {
     fn new() -> Self {
-        LiveDisplay {
-            ru_text: String::new(),
-            en_text: String::new(),
-            lines: 0,
+        TwoLineDisplay {
+            ru: String::new(),
+            en: String::new(),
+            active: false,
+            term_width: get_terminal_width(),
         }
     }
 
-    /// Update [RU] partial text (overwrites in place).
     fn update_ru(&mut self, text: &str) {
-        self.ru_text = text.to_string();
-        self.render_live();
+        self.ru = text.to_string();
+        self.render();
     }
 
-    /// Update [EN] partial text (overwrites in place).
     fn update_en(&mut self, text: &str) {
-        self.en_text = text.to_string();
-        self.render_live();
+        self.en = text.to_string();
+        self.render();
     }
 
-    /// Finalize [RU] line (utterance complete, waiting for translation).
-    fn finalize_ru(&mut self, text: &str) {
-        self.ru_text = text.to_string();
-        self.render_live();
-    }
-
-    /// Finalize [EN] line and commit both lines (move to next pair).
-    fn finalize_en(&mut self, text: &str) {
-        self.en_text = text.to_string();
-        self.render_commit();
-    }
-
-    /// Commit without EN text (noise/empty result).
-    fn finalize_empty(&mut self) {
-        self.render_commit();
-    }
-
-    /// Clear partial display (empty transcription).
-    fn clear_partial(&mut self) {
-        self.move_to_top();
-        let mut stdout = std::io::stdout();
-        write!(stdout, "\r\x1B[2K").ok();
-        if self.lines > 1 {
-            write!(stdout, "\n\r\x1B[2K\x1B[1A").ok();
+    /// Commit both lines with println and reset for next utterance.
+    fn commit(&mut self, en_text: &str) {
+        self.en = en_text.to_string();
+        let mut out = std::io::stdout();
+        if self.active {
+            // Go up to line 1, clear it
+            write!(out, "\x1B[1A\r\x1B[2K").ok();
         }
-        stdout.flush().ok();
-        self.ru_text.clear();
-        self.en_text.clear();
-        self.lines = 0;
+        // Print committed lines
+        writeln!(out, "{}", self.ru).ok();
+        writeln!(out, "{}", self.en).ok();
+        out.flush().ok();
+        self.ru.clear();
+        self.en.clear();
+        self.active = false;
     }
 
-    /// Redraw both lines in place (no newline — stays on same position).
-    fn render_live(&mut self) {
-        self.move_to_top();
-        let mut stdout = std::io::stdout();
-
-        // Write RU line
-        write!(stdout, "\r\x1B[2K{}", self.ru_text).ok();
-
-        if !self.en_text.is_empty() {
-            // Write EN line below
-            write!(stdout, "\n\r\x1B[2K{}", self.en_text).ok();
-            self.lines = 2;
-        } else {
-            self.lines = 1;
+    /// Commit RU only (no translation).
+    fn commit_ru_only(&mut self) {
+        let mut out = std::io::stdout();
+        if self.active {
+            write!(out, "\x1B[1A\r\x1B[2K").ok();
         }
-        stdout.flush().ok();
+        if !self.ru.is_empty() {
+            writeln!(out, "{}", self.ru).ok();
+        }
+        // Clear line 2 remains
+        write!(out, "\r\x1B[2K").ok();
+        out.flush().ok();
+        self.ru.clear();
+        self.en.clear();
+        self.active = false;
     }
 
-    /// Commit both lines (println) and reset for next utterance.
-    fn render_commit(&mut self) {
-        self.move_to_top();
-        let mut stdout = std::io::stdout();
+    /// Redraw both lines in place. Cursor ends at line 2.
+    fn render(&mut self) {
+        let w = self.term_width;
+        let mut out = std::io::stdout();
 
-        // Print RU (committed)
-        write!(stdout, "\r\x1B[2K{}", self.ru_text).ok();
-
-        if !self.en_text.is_empty() {
-            // Print EN below
-            write!(stdout, "\n\r\x1B[2K{}", self.en_text).ok();
+        if self.active {
+            // Move up from line 2 to line 1
+            write!(out, "\x1B[1A").ok();
         }
 
-        // Newline to commit — next utterance starts on fresh line
-        writeln!(stdout).ok();
-        stdout.flush().ok();
+        // Line 1: [RU]
+        write!(out, "\r\x1B[2K{}", self.ru).ok();
+        // Line 2: [EN] (or blank)
+        write!(out, "\n\r\x1B[2K{}", self.en).ok();
+        out.flush().ok();
 
-        self.ru_text.clear();
-        self.en_text.clear();
-        self.lines = 0;
+        self.active = true;
+        // Cursor is now at end of line 2
+    }
+}
+
+fn truncate(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).collect()
+}
+
+fn get_terminal_width() -> usize {
+    // Try COLUMNS env var first, then ioctl, fallback to 200
+    if let Ok(cols) = std::env::var("COLUMNS") {
+        if let Ok(w) = cols.parse::<usize>() {
+            if w > 40 { return w; }
+        }
     }
 
-    /// Move cursor back to the top of our display area.
-    fn move_to_top(&self) {
-        if self.lines > 1 {
-            let mut stdout = std::io::stdout();
-            // Move up from EN line to RU line
-            for _ in 1..self.lines {
-                write!(stdout, "\x1B[1A").ok();
+    #[cfg(unix)]
+    {
+        use std::mem::zeroed;
+        unsafe {
+            let mut ws: libc::winsize = zeroed();
+            if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 {
+                return ws.ws_col as usize;
             }
         }
     }
-}
 
-fn rms_energy(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let sum: f32 = samples.iter().map(|s| s * s).sum();
-    (sum / samples.len() as f32).sqrt()
+    200
 }

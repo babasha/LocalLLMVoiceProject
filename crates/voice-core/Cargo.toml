@@ -55,5 +55,8 @@ sherpa-onnx = "1.12.31"
 # UTF-8 decoding for token output
 encoding_rs = "0.8"
 
+# Terminal size detection
+libc = "0.2"
+
 [dev-dependencies]
 assert_no_alloc = "1.1"

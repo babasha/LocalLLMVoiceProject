@@ -1,115 +1,80 @@
+use sherpa_onnx::{SileroVadModelConfig, VadModelConfig, VoiceActivityDetector};
 use tracing::info;
 
 use crate::config::VadConfig;
-use crate::error::Result;
-use crate::vad::segment::SpeechSegment;
+use crate::error::{Result, VoiceTranslatorError};
 
-/// Voice Activity Detector using Silero VAD.
-/// Accumulates audio samples and emits SpeechSegments when speech ends.
+/// Voice Activity Detector using Silero VAD v5 via sherpa-onnx.
 pub struct VadDetector {
-    config: VadConfig,
+    vad: VoiceActivityDetector,
     sample_rate: u32,
-    /// Accumulated audio during active speech
-    speech_buffer: Vec<f32>,
-    /// Whether we are currently in a speech region
-    is_speaking: bool,
-    /// Number of consecutive silent frames
-    silent_frames: u32,
-    /// Samples per VAD frame (typically 30ms = 480 samples at 16kHz)
-    frame_size: usize,
-    /// Max samples before force-flushing (30 seconds)
-    max_segment_samples: usize,
 }
 
 impl VadDetector {
     pub fn new(config: &VadConfig, sample_rate: u32) -> Result<Self> {
-        let frame_size = (sample_rate as usize * 30) / 1000; // 30ms frames
+        let vad_config = VadModelConfig {
+            silero_vad: SileroVadModelConfig {
+                model: Some(config.model_path.clone()),
+                threshold: config.threshold,
+                min_silence_duration: config.silence_duration_ms as f32 / 1000.0,
+                min_speech_duration: config.min_speech_duration_ms as f32 / 1000.0,
+                window_size: 512,
+                max_speech_duration: config.max_speech_duration_ms as f32 / 1000.0,
+            },
+            sample_rate: sample_rate as i32,
+            num_threads: 2,
+            ..Default::default()
+        };
+
+        let vad = VoiceActivityDetector::create(&vad_config, 60.0).ok_or_else(|| {
+            VoiceTranslatorError::Pipeline("Failed to create Silero VAD".into())
+        })?;
 
         info!(
-            "VAD initialized: threshold={}, silence={}ms, frame_size={}",
-            config.threshold, config.silence_duration_ms, frame_size
+            "Silero VAD initialized: threshold={}, silence={}ms, max_speech={}ms",
+            config.threshold, config.silence_duration_ms, config.max_speech_duration_ms
         );
 
-        let max_segment_samples = sample_rate as usize * 4; // 4s hard limit for near-realtime
-
-        Ok(VadDetector {
-            config: config.clone(),
-            sample_rate,
-            speech_buffer: Vec::with_capacity(sample_rate as usize * 10),
-            is_speaking: false,
-            silent_frames: 0,
-            frame_size,
-            max_segment_samples,
-        })
+        Ok(VadDetector { vad, sample_rate })
     }
 
-    /// Process a chunk of audio samples. Returns completed speech segments.
-    /// TODO: Integrate actual Silero VAD model in Phase 2.
-    /// For now, uses simple energy-based detection as placeholder.
-    pub fn process(&mut self, samples: &[f32]) -> Vec<SpeechSegment> {
-        let mut segments = Vec::new();
-        let silence_frames_threshold =
-            (self.config.silence_duration_ms as f32 / 30.0).ceil() as u32;
-        let min_speech_samples =
-            (self.config.min_speech_duration_ms as f32 * self.sample_rate as f32 / 1000.0) as usize;
-
-        // Process in frames
-        for chunk in samples.chunks(self.frame_size) {
-            let energy = rms_energy(chunk);
-            // threshold=0.5 in config → effective energy ~0.025 (filters room noise ~0.005)
-            let is_speech = energy > self.config.threshold * 0.05;
-
-            if is_speech {
-                self.silent_frames = 0;
-                if !self.is_speaking {
-                    self.is_speaking = true;
-                }
-                self.speech_buffer.extend_from_slice(chunk);
-            } else if self.is_speaking {
-                self.silent_frames += 1;
-                self.speech_buffer.extend_from_slice(chunk);
-
-                if self.silent_frames >= silence_frames_threshold {
-                    if self.speech_buffer.len() >= min_speech_samples {
-                        let segment =
-                            SpeechSegment::new(self.speech_buffer.drain(..).collect(), self.sample_rate);
-                        segments.push(segment);
-                    } else {
-                        self.speech_buffer.clear();
-                    }
-                    self.is_speaking = false;
-                    self.silent_frames = 0;
-                }
-            }
-
-            // Hard limit: force flush if segment grew too long
-            if self.speech_buffer.len() >= self.max_segment_samples {
-                let segment =
-                    SpeechSegment::new(self.speech_buffer.drain(..).collect(), self.sample_rate);
-                segments.push(segment);
-                self.is_speaking = false;
-                self.silent_frames = 0;
-            }
-        }
-
-        segments
+    /// Feed audio samples to the VAD.
+    pub fn accept_waveform(&self, samples: &[f32]) {
+        self.vad.accept_waveform(samples);
     }
 
-    /// Force-flush any remaining speech buffer (e.g., on shutdown).
-    pub fn flush(&mut self) -> Option<SpeechSegment> {
-        if self.speech_buffer.is_empty() {
+    /// Returns true if speech is currently being detected.
+    pub fn is_speech(&self) -> bool {
+        self.vad.detected()
+    }
+
+    /// Returns true if there are completed speech segments available.
+    pub fn has_segment(&self) -> bool {
+        !self.vad.is_empty()
+    }
+
+    /// Get the next completed speech segment's audio and remove it from the queue.
+    pub fn pop_segment(&self) -> Option<Vec<f32>> {
+        if self.vad.is_empty() {
             return None;
         }
-        let segment = SpeechSegment::new(self.speech_buffer.drain(..).collect(), self.sample_rate);
-        self.is_speaking = false;
-        Some(segment)
+        let segment = self.vad.front()?;
+        let audio = segment.samples().to_vec();
+        self.vad.pop();
+        Some(audio)
     }
-}
 
-fn rms_energy(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
+    /// Flush any trailing speech on shutdown.
+    pub fn flush(&self) {
+        self.vad.flush();
     }
-    let sum: f32 = samples.iter().map(|s| s * s).sum();
-    (sum / samples.len() as f32).sqrt()
+
+    /// Reset VAD state.
+    pub fn reset(&self) {
+        self.vad.reset();
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
 }
