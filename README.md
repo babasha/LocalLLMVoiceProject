@@ -17,6 +17,34 @@ cd LocalLLMVoiceProject
 
 `setup.sh` сам проверит зависимости, скачает все модели (~3.1 GB) и соберёт проект.
 
+## Запуск на Windows (нативно, GPU)
+
+`setup.sh`/`run.sh` рассчитаны на Linux. На Windows проект собирается и работает **нативно** (проверено на RTX 5070 Laptop, CUDA 13.3) через batch-обёртки в корне репозитория — WSL не нужен.
+
+### Разовая установка тулчейна (через `winget`)
+
+- **Rust** (MSVC): `Rustlang.Rustup`
+- **VS Build Tools** (C++): `Microsoft.VisualStudio.2022.BuildTools` + workload `Microsoft.VisualStudio.Workload.VCTools`
+- **CMake**: `Kitware.CMake`
+- **CUDA Toolkit** 12.8+ (для Blackwell/RTX 50xx — 13.x): `Nvidia.CUDA`
+- **LLVM** (libclang для bindgen): `LLVM.LLVM`
+
+### Сборка и запуск
+
+```bat
+build_win.bat   :: сборка (MSVC + CUDA, генератор Ninja); артефакты в C:\cargo-target (вне OneDrive)
+run_win.bat     :: полный пайплайн в консоли (mic → STT → перевод)
+ui.bat          :: небольшое окно с живым выводом RU → EN + история фраз
+```
+
+### Важные нюансы Windows
+
+- **Модели — вне OneDrive.** Лежат в `C:\voice-translator\models`, пути в `config/default.toml` абсолютные. В синхронизируемой папке OneDrive файлы становятся placeholder'ами, и llama.cpp не может прочитать GGUF (`failed to read magic`).
+- **Нативные библиотеки sherpa-onnx** для Windows — в `libs/sherpa-onnx-win` (взяты из релиза k2-fsa `win-x64-shared-MD-Release`; `onnxruntime.lib` сгенерирована из DLL). Эти DLL копируются рядом с exe, иначе грузится системная `onnxruntime.dll` (Windows ML, версия старее) из `System32`.
+- **CUDA 13**: рантайм-DLL (`cublas64_13`, `cudart64_13`) лежат в `bin\x64` (а не `bin`); cmake собирает llama.cpp генератором **Ninja** (генератор Visual Studio спотыкается на `CudaToolkitDir`).
+- **`llama-cpp-2 = 0.1.146`** — требуется для архитектуры `qwen35` (Qwen3.5: Gated DeltaNet + MoE); более старые версии модель не грузят.
+- **Аудио** захватывается в нативном формате устройства (напр. 48 кГц стерео) и ресемплится в 16 кГц моно «на лету» — жёсткий запрос 16 кГц на многих микрофонах не поддерживается.
+
 ## Требования
 
 | Что | Минимум | Рекомендуется |
@@ -152,8 +180,8 @@ tokens_path = "models/gigaam_v3_e2e_ctc_tokens.txt"
 
 ### Перевод — LLM Translation
 
-**Модель:** [Qwen3.5-4B](https://huggingface.co/AaryanK/Qwen3.5-4B-GGUF) (2.7 GB, GGUF Q4_K_M)
-**Обёртка:** llama-cpp-2 (Rust bindings для llama.cpp) с CUDA
+**Модель:** [Qwen3.5-4B](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF) (2.7 GB, GGUF Q4_K_M)
+**Обёртка:** llama-cpp-2 `0.1.146` (Rust bindings для llama.cpp) с CUDA — версия важна: архитектура `qwen35` поддерживается только в свежем llama.cpp
 
 Переводит распознанный текст с одного языка на другой используя LLM.
 
@@ -232,8 +260,13 @@ enable_thinking = false   # Без thinking — быстрее
 
 ```
 LocalLLMVoiceProject/
-├── setup.sh                    # Установка: зависимости + модели + сборка
-├── run.sh                      # Запуск переводчика
+├── setup.sh                    # Установка: зависимости + модели + сборка (Linux)
+├── run.sh                      # Запуск переводчика (Linux)
+├── build_win.bat               # Сборка под Windows (MSVC + CUDA + Ninja)
+├── run_win.bat                 # Запуск полного пайплайна (Windows)
+├── ui.bat                      # Запуск desktop-UI (Windows)
+├── ui_win.ps1                  # Окно WinForms: живой вывод RU → EN
+├── _ui_launch.bat              # Внутренний лаунчер для ui_win.ps1
 ├── chat.sh                     # Чат с LLM в терминале
 ├── chat-no-think.sh            # Чат без thinking mode
 ├── server.sh                   # Локальный OpenAI-совместимый API-сервер
@@ -247,10 +280,11 @@ LocalLLMVoiceProject/
 │   ├── piper-en_US-lessac-medium.onnx      # TTS Piper — 63 MB
 │   └── piper-en_US-lessac-medium.onnx.json # Метаданные Piper
 ├── libs/
-│   └── sherpa-onnx/            # Нативные библиотеки sherpa-onnx
-│       ├── libonnxruntime.so
-│       ├── libsherpa-onnx-c-api.so
-│       └── libsherpa-onnx-cxx-api.so
+│   ├── sherpa-onnx/            # Нативные библиотеки sherpa-onnx (Linux)
+│   │   ├── libonnxruntime.so
+│   │   ├── libsherpa-onnx-c-api.so
+│   │   └── libsherpa-onnx-cxx-api.so
+│   └── sherpa-onnx-win/        # Windows DLL + .lib (+ сген. onnxruntime.lib)
 ├── crates/
 │   └── voice-core/             # Основная библиотека и CLI
 │       └── src/
@@ -302,7 +336,7 @@ LocalLLMVoiceProject/
 |-----------|--------|--------|----------|--------|
 | VAD | Silero VAD v5 | 630 KB | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | ONNX |
 | STT | GigaAM-v3 E2E CTC | 320 MB | [Smirnov75/GigaAM-v3-sherpa-onnx](https://huggingface.co/Smirnov75/GigaAM-v3-sherpa-onnx) | ONNX INT8 |
-| Перевод | Qwen3.5-4B Q4_K_M | 2.7 GB | [AaryanK/Qwen3.5-4B-GGUF](https://huggingface.co/AaryanK/Qwen3.5-4B-GGUF) | GGUF |
+| Перевод | Qwen3.5-4B Q4_K_M | 2.7 GB | [unsloth/Qwen3.5-4B-GGUF](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF) | GGUF |
 | TTS | Piper en_US lessac | 63 MB | [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices) | ONNX |
 
 ## Конфигурация
