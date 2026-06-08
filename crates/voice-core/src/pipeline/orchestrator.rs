@@ -71,7 +71,7 @@ impl Orchestrator {
 
         let (producer, mut consumer) = RingBuffer::<f32>::new(sample_rate as usize * 8);
         let input_device = device::default_input_device()?;
-        let _input_stream = capture::start_capture(&input_device, sample_rate, channels, producer)?;
+        let _input_stream = capture::start_capture_converted(&input_device, sample_rate, producer)?;
 
         let shutdown = self.shutdown.clone();
         let stt_cfg = self.config.stt.clone();
@@ -138,7 +138,7 @@ impl Orchestrator {
 
         let (producer, mut consumer) = RingBuffer::<f32>::new(sample_rate as usize * 8);
         let input_device = device::default_input_device()?;
-        let _input_stream = capture::start_capture(&input_device, sample_rate, channels, producer)?;
+        let _input_stream = capture::start_capture_converted(&input_device, sample_rate, producer)?;
 
         let (stt_tx, stt_rx) = bounded::<SttEvent>(16);
         let display = Arc::new(Mutex::new(TwoLineDisplay::new()));
@@ -302,6 +302,7 @@ struct TwoLineDisplay {
     en: String,
     active: bool, // true after first render (we occupy 2 lines)
     term_width: usize,
+    ui_mode: bool, // emit clean machine-readable lines instead of ANSI (for GUI)
 }
 
 impl TwoLineDisplay {
@@ -311,22 +312,37 @@ impl TwoLineDisplay {
             en: String::new(),
             active: false,
             term_width: get_terminal_width(),
+            ui_mode: std::env::var("VOICE_UI").is_ok(),
         }
     }
 
     fn update_ru(&mut self, text: &str) {
         self.ru = text.to_string();
-        self.render();
+        if self.ui_mode {
+            emit_ui("RU", strip_tag(text), "");
+        } else {
+            self.render();
+        }
     }
 
     fn update_en(&mut self, text: &str) {
         self.en = text.to_string();
-        self.render();
+        if self.ui_mode {
+            emit_ui("EN", strip_tag(text), "");
+        } else {
+            self.render();
+        }
     }
 
     /// Commit both lines with println and reset for next utterance.
     fn commit(&mut self, en_text: &str) {
         self.en = en_text.to_string();
+        if self.ui_mode {
+            emit_ui("FINAL", strip_tag(&self.ru), strip_tag(en_text));
+            self.ru.clear();
+            self.en.clear();
+            return;
+        }
         let mut out = std::io::stdout();
         if self.active {
             // Go up to line 1, clear it
@@ -343,6 +359,12 @@ impl TwoLineDisplay {
 
     /// Commit RU only (no translation).
     fn commit_ru_only(&mut self) {
+        if self.ui_mode {
+            emit_ui("FINAL", strip_tag(&self.ru), "");
+            self.ru.clear();
+            self.en.clear();
+            return;
+        }
         let mut out = std::io::stdout();
         if self.active {
             write!(out, "\x1B[1A\r\x1B[2K").ok();
@@ -379,6 +401,28 @@ impl TwoLineDisplay {
     }
 }
 
+/// Emit a clean, tab-delimited record for an external UI to parse.
+/// Each record is prefixed with US (0x1F) so the GUI can ignore any other
+/// stdout noise. Kinds: "RU"/"EN" carry a live partial in `a`; "FINAL"
+/// carries the committed `a`=source and `b`=translation.
+fn emit_ui(kind: &str, a: &str, b: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = writeln!(out, "\u{1f}{kind}\t{a}\t{b}");
+    let _ = out.flush();
+}
+
+/// Strip a leading "[XX] " language tag (e.g. "[RU] привет" → "привет").
+fn strip_tag(s: &str) -> &str {
+    if s.starts_with('[') {
+        if let Some(i) = s.find("] ") {
+            return &s[i + 2..];
+        }
+    }
+    s
+}
+
+#[allow(dead_code)]
 fn truncate(s: &str, max_chars: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_chars {

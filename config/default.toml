@@ -20,7 +20,7 @@ target = "en"
 
 [vad]
 # Path to Silero VAD v5 ONNX model
-model_path = "models/silero_vad.onnx"
+model_path = "C:/voice-translator/models/silero_vad.onnx"
 # Speech detection threshold (0.0 - 1.0)
 threshold = 0.5
 # Silence duration (ms) to mark end of speech
@@ -32,15 +32,15 @@ max_speech_duration_ms = 15000
 
 [stt]
 # Path to GigaAM-v3 e2e CTC INT8 model (NeMo format, with punctuation)
-model_path = "models/gigaam_v3_e2e_ctc_int8.onnx"
+model_path = "C:/voice-translator/models/gigaam_v3_e2e_ctc_int8.onnx"
 # Path to tokens vocabulary file
-tokens_path = "models/gigaam_v3_e2e_ctc_tokens.txt"
+tokens_path = "C:/voice-translator/models/gigaam_v3_e2e_ctc_tokens.txt"
 # Language hint (empty = auto-detect)
 language = "ru"
 
 [translation]
 # Path to Qwen3.5-4B GGUF model
-model_path = "models/Qwen3.5-4B-Q4_K_M.gguf"
+model_path = "C:/voice-translator/models/Qwen3.5-4B-Q4_K_M.gguf"
 # Number of GPU layers to offload (99 = all layers)
 n_gpu_layers = 99
 # Context size (4096 is plenty for translation)
@@ -56,9 +56,9 @@ enable_thinking = false
 # TTS engine: "kokoro" or "piper"
 engine = "kokoro"
 # Kokoro model path
-kokoro_model_path = "models/kokoro-v0_19-fp16.onnx"
+kokoro_model_path = "C:/voice-translator/models/kokoro-v0_19-fp16.onnx"
 # Piper model path
-piper_model_path = "models/piper-en_US-lessac-medium.onnx"
+piper_model_path = "C:/voice-translator/models/piper-en_US-lessac-medium.onnx"
 # Voice name/id for Kokoro
 kokoro_voice = "af_heart"
 # Output sample rate

@@ -31,7 +31,10 @@ impl TranslationEngine {
             VoiceTranslatorError::Translation(format!("Failed to init llama backend: {e}"))
         })?;
         // Suppress llama.cpp/ggml internal log spam (CUDA graph warmup, etc.)
-        backend.void_logs();
+        // Keep logs when VOICE_LLAMA_LOGS is set (diagnostics).
+        if std::env::var("VOICE_LLAMA_LOGS").is_err() {
+            backend.void_logs();
+        }
 
         let model_params = pin!(LlamaModelParams::default()
             .with_n_gpu_layers(config.n_gpu_layers));
