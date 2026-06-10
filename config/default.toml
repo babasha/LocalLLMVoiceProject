@@ -23,12 +23,14 @@ target = "en"
 model_path = "C:/voice-translator/models/silero_vad.onnx"
 # Speech detection threshold (0.0 - 1.0)
 threshold = 0.5
-# Silence duration (ms) to mark end of speech
-silence_duration_ms = 1500
+# Silence duration (ms) to mark end of speech.
+# Lower = snappier, closer to simultaneous (but cuts on short pauses); 1500 was very laggy.
+silence_duration_ms = 250
 # Minimum speech duration (ms) to process
 min_speech_duration_ms = 300
-# Maximum speech duration (ms) before force-flush
-max_speech_duration_ms = 15000
+# Maximum speech duration (ms) before force-flush.
+# Lower = long monologues get chunked and spoken progressively instead of all at the end.
+max_speech_duration_ms = 7000
 
 [stt]
 # Path to GigaAM-v3 e2e CTC INT8 model (NeMo format, with punctuation)
@@ -47,19 +49,30 @@ n_gpu_layers = 99
 context_size = 4096
 # Max tokens to generate per translation
 max_tokens = 128
-# Temperature (low for deterministic translation)
-temperature = 0.1
+# Temperature: 0.0 = greedy/argmax decoding. Deterministic output keeps
+# consecutive streaming partials stable so settled words can be voiced early.
+temperature = 0.0
 # Disable thinking mode for faster translation
 enable_thinking = false
 
 [tts]
-# TTS engine: "kokoro" or "piper"
-engine = "kokoro"
-# Kokoro model path
+# Speaking engine: "piper" (streaming neural, recommended) or "sapi" (built-in Windows voice)
+engine = "piper"
+# Kokoro model path (unused placeholder)
 kokoro_model_path = "C:/voice-translator/models/kokoro-v0_19-fp16.onnx"
-# Piper model path
-piper_model_path = "C:/voice-translator/models/piper-en_US-lessac-medium.onnx"
+# Piper VITS model + phonemization assets (from sherpa vits-piper bundle)
+piper_model_path = "C:/voice-translator/models/vits-piper-en_US-lessac-medium/en_US-lessac-medium.onnx"
+piper_tokens_path = "C:/voice-translator/models/vits-piper-en_US-lessac-medium/tokens.txt"
+piper_data_dir = "C:/voice-translator/models/vits-piper-en_US-lessac-medium/espeak-ng-data"
 # Voice name/id for Kokoro
 kokoro_voice = "af_heart"
 # Output sample rate
 output_sample_rate = 24000
+# Speak the English translation aloud
+speak = true
+# Output device for spoken audio. Empty = default speakers.
+# Install VB-CABLE and set this to "CABLE Input" to expose English as a virtual mic
+# (then pick "CABLE Output" as the microphone in Telegram/Discord/etc.).
+output_device = ""
+# Speech rate: SAPI -10..10; Piper speed = 1.0 + rate*0.05. Slightly faster keeps up with live speech.
+rate = 2

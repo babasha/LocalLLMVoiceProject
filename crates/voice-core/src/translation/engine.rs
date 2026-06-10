@@ -1,6 +1,7 @@
 use std::num::NonZeroU32;
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tracing::{debug, info};
 
@@ -81,16 +82,37 @@ impl TranslationEngine {
         source_lang: &str,
         target_lang: &str,
     ) -> Result<String> {
+        self.translate_prefixed(ctx, text, "", source_lang, target_lang)
+    }
+
+    /// Incremental ("simultaneous") translation: prefill the assistant turn with
+    /// `prefix` — the English we have *already spoken aloud* — so the model is
+    /// forced to *continue* from it instead of re-translating the growing
+    /// utterance from scratch. Because the committed prefix is locked into the
+    /// prompt, the model can never contradict words the listener already heard,
+    /// and each newly generated word can be voiced almost immediately.
+    ///
+    /// Returns the full translation (`prefix` + freshly generated continuation),
+    /// so callers can diff against `prefix` to find the new tail.
+    pub fn translate_prefixed(
+        &self,
+        ctx: &mut LlamaContext<'_>,
+        text: &str,
+        prefix: &str,
+        source_lang: &str,
+        target_lang: &str,
+    ) -> Result<String> {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return Ok(String::new());
         }
+        let prefix = prefix.trim();
 
         // Clear KV cache before each new prompt — required for M-RoPE (Qwen3.5):
         // positions must be monotonically increasing, so we reset to 0 each call.
         ctx.clear_kv_cache();
 
-        let full_prompt = self.build_chat_prompt(trimmed, source_lang, target_lang);
+        let full_prompt = self.build_chat_prompt(trimmed, prefix, source_lang, target_lang);
         debug!("Prompt: {}", full_prompt);
 
         let tokens = self
@@ -111,16 +133,32 @@ impl TranslationEngine {
             })?;
         }
 
+        let perf = std::env::var("VOICE_PERF").is_ok();
+        let t_prompt = perf.then(Instant::now);
+        let prompt_tokens = tokens.len();
+
         ctx.decode(&mut batch).map_err(|e| {
             VoiceTranslatorError::Translation(format!("Prompt decode failed: {e}"))
         })?;
+        let prompt_ms = t_prompt.map(|t| t.elapsed().as_secs_f64() * 1000.0);
+        let t_gen = perf.then(Instant::now);
+        let mut gen_tokens = 0usize;
 
-        let mut sampler = LlamaSampler::chain_simple([
-            LlamaSampler::temp(self.config.temperature),
-            LlamaSampler::top_k(20),
-            LlamaSampler::top_p(0.8, 1),
-            LlamaSampler::dist(42),
-        ]);
+        // Greedy (argmax) when temperature <= 0: deterministic decoding keeps
+        // consecutive partial translations stable, which is essential for
+        // streaming — a sampled re-translation would jitter the prefix and
+        // strand words that should have been voiced. Fall back to the sampled
+        // chain only if a positive temperature is explicitly configured.
+        let mut sampler = if self.config.temperature <= 0.0 {
+            LlamaSampler::greedy()
+        } else {
+            LlamaSampler::chain_simple([
+                LlamaSampler::temp(self.config.temperature),
+                LlamaSampler::top_k(20),
+                LlamaSampler::top_p(0.8, 1),
+                LlamaSampler::dist(42),
+            ])
+        };
 
         let mut output = String::new();
         let mut decoder = encoding_rs::UTF_8.new_decoder();
@@ -147,6 +185,7 @@ impl TranslationEngine {
             }
 
             output.push_str(&piece);
+            gen_tokens += 1;
 
             batch.clear();
             batch.add(token, n_cur, &[0], true).map_err(|e| {
@@ -160,16 +199,44 @@ impl TranslationEngine {
             n_cur += 1;
         }
 
-        let result = self.clean_output(&output);
+        if let (Some(pms), Some(tg)) = (prompt_ms, t_gen) {
+            let gen_ms = tg.elapsed().as_secs_f64() * 1000.0;
+            let tps = if gen_ms > 0.0 { gen_tokens as f64 / (gen_ms / 1000.0) } else { 0.0 };
+            eprintln!(
+                "[PERF] TR: prompt {prompt_tokens}tok/{pms:.0}ms, gen {gen_tokens}tok/{gen_ms:.0}ms = {tps:.1} tok/s"
+            );
+        }
+
+        // The model only generated the continuation; re-attach the forced
+        // prefix so callers receive the full translation and can diff for the
+        // newly settled tail.
+        let continuation = self.clean_output(&output);
+        let result = if prefix.is_empty() {
+            continuation
+        } else if continuation.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{prefix} {continuation}")
+        };
         debug!("Translation result: '{}'", result);
         Ok(result)
     }
 
-    fn build_chat_prompt(&self, text: &str, source_lang: &str, target_lang: &str) -> String {
+    fn build_chat_prompt(
+        &self,
+        text: &str,
+        prefix: &str,
+        source_lang: &str,
+        target_lang: &str,
+    ) -> String {
         let system = prompt::system_prompt(source_lang, target_lang);
         let user = prompt::build_translation_prompt(text, source_lang, target_lang);
 
-        if self.config.enable_thinking {
+        // Prefill the assistant turn with the already-spoken English so the model
+        // continues from it (incremental/simultaneous decoding) rather than
+        // re-emitting the whole sentence. No trailing space: the next generated
+        // token piece carries its own leading space.
+        let head = if self.config.enable_thinking {
             format!(
                 "<|im_start|>system\n{system}<|im_end|>\n\
                  <|im_start|>user\n{user}<|im_end|>\n\
@@ -181,7 +248,8 @@ impl TranslationEngine {
                  <|im_start|>user\n{user}<|im_end|>\n\
                  <|im_start|>assistant\n<think>\n</think>\n"
             )
-        }
+        };
+        format!("{head}{prefix}")
     }
 
     fn clean_output(&self, raw: &str) -> String {

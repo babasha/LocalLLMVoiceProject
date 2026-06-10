@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::DeviceTrait;
 use crossbeam_channel::bounded;
@@ -159,12 +159,22 @@ impl Orchestrator {
             };
             info!("STT + Silero VAD ready");
 
-            let partial_every = sample_rate as usize;
+            let perf = std::env::var("VOICE_PERF").is_ok();
+            // Chunk-based streaming ASR with LocalAgreement-2 (Whisper-Streaming
+            // style): re-transcribe the growing utterance buffer ~every 0.4s and
+            // commit only the RU prefix that agreed between the two most recent
+            // transcriptions. Stable RU words are streamed to translation before
+            // the speaker pauses; VAD still bounds/segments the utterance.
+            // Faster cadence ⇒ words commit sooner (LA-2 latency ≈ 2 intervals);
+            // STT RTF ≈ 0.02 so re-transcribing the buffer this often is cheap,
+            // and the translation thread self-throttles by draining to latest.
+            let partial_every = sample_rate as usize * 2 / 5;
             let chunk = 512usize;
             let mut tmp = vec![0.0f32; chunk];
             let mut pbuf: Vec<f32> = Vec::new();
             let mut since_partial = 0usize;
-            let mut last_text = String::new();
+            let mut prev_text = String::new(); // previous transcription (for agreement)
+            let mut committed = 0usize; // RU words already emitted as stable
 
             while !shutdown_stt.is_shutdown() {
                 let avail = consumer.slots();
@@ -174,9 +184,17 @@ impl Orchestrator {
                 let frame = &tmp[..n];
                 vad.accept_waveform(frame);
 
-                // Completed segments → final
+                // Completed segments → final transcription, then reset LA state.
                 while let Some(seg) = vad.pop_segment() {
-                    if let Ok(text) = stt.transcribe(&seg) {
+                    let t_stt = perf.then(Instant::now);
+                    let tr = stt.transcribe(&seg);
+                    if let Some(t) = t_stt {
+                        let audio_s = seg.len() as f64 / sample_rate as f64;
+                        let stt_ms = t.elapsed().as_secs_f64() * 1000.0;
+                        let rtf = if audio_s > 0.0 { (stt_ms / 1000.0) / audio_s } else { 0.0 };
+                        eprintln!("[PERF] STT: {stt_ms:.0}ms for {audio_s:.2}s audio (RTF {rtf:.2})");
+                    }
+                    if let Ok(text) = tr {
                         if !text.is_empty() {
                             d1.lock().unwrap().update_ru(&format!("[{src_tag}] {text}"));
                             let _ = stt_tx.send(SttEvent::Final(text));
@@ -184,21 +202,31 @@ impl Orchestrator {
                     }
                     pbuf.clear();
                     since_partial = 0;
-                    last_text.clear();
+                    prev_text.clear();
+                    committed = 0;
                 }
 
-                // Partials while speaking
+                // While speaking: grow the buffer and run LocalAgreement-2.
                 if vad.is_speech() {
                     pbuf.extend_from_slice(frame);
                     since_partial += n;
                     if since_partial >= partial_every && pbuf.len() > sample_rate as usize / 2 {
-                        if let Ok(text) = stt.transcribe(&pbuf) {
-                            if !text.is_empty() {
-                                d1.lock().unwrap().update_ru(&format!("[{src_tag}] {text}"));
-                                if text != last_text {
-                                    last_text = text.clone();
-                                    let _ = stt_tx.try_send(SttEvent::Partial(text));
+                        if let Ok(cur) = stt.transcribe(&pbuf) {
+                            if !cur.is_empty() {
+                                // Show the full live transcription on screen...
+                                d1.lock().unwrap().update_ru(&format!("[{src_tag}] {cur}"));
+                                // ...but only stream the agreed (stable) prefix.
+                                let agreed = common_word_prefix(&prev_text, &cur);
+                                if agreed > committed {
+                                    committed = agreed;
+                                    let stable: String = cur
+                                        .split_whitespace()
+                                        .take(agreed)
+                                        .collect::<Vec<_>>()
+                                        .join(" ");
+                                    let _ = stt_tx.try_send(SttEvent::Partial(stable));
                                 }
+                                prev_text = cur;
                             }
                         }
                         since_partial = 0;
@@ -218,6 +246,7 @@ impl Orchestrator {
         let tr_cfg = self.config.translation.clone();
         let src_lang = self.config.languages.source.clone();
         let tgt_lang = self.config.languages.target.clone();
+        let tts_cfg = self.config.tts.clone();
         let d2 = display.clone();
 
         let _tr = thread::Builder::new().name("translation".into()).spawn(move || {
@@ -230,34 +259,86 @@ impl Orchestrator {
             info!("Translation engine ready");
             let tag = tgt_lang.to_uppercase();
 
+            // Optional: speak the translation aloud (Piper streaming, or SAPI).
+            let speaker = if tts_cfg.speak {
+                match crate::tts::create_speaker(&tts_cfg) {
+                    Ok(s) => Some(s),
+                    Err(e) => { error!("TTS disabled: {e}"); None }
+                }
+            } else {
+                None
+            };
+
+            // Incremental ("simultaneous") streaming state, per segment:
+            //   spoken — the exact target-language text we have already
+            //   committed (voiced + shown). It is fed back to the model as a
+            //   forced prefix so each new partial *continues* it instead of
+            //   re-translating from scratch; the model therefore can never
+            //   contradict words the listener already heard. We voice the newly
+            //   generated tail except the last HOLD words, which may still
+            //   change as more of the sentence arrives. The final flushes
+            //   whatever remains, then state resets for the next segment.
+            const HOLD: usize = 2;
+            let mut spoken = String::new();
+
             while !shutdown_tr.is_shutdown() {
                 let ev = match stt_rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(e) => e,
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
                     Err(_) => break,
                 };
-                // Drain to latest
-                let mut latest = ev;
-                while let Ok(newer) = stt_rx.try_recv() { latest = newer; }
+                // Drain the channel; keep the newest partial and the newest final.
+                let mut events = vec![ev];
+                while let Ok(newer) = stt_rx.try_recv() { events.push(newer); }
+                let mut latest_partial: Option<String> = None;
+                let mut latest_final: Option<String> = None;
+                for e in events {
+                    match e {
+                        SttEvent::Partial(t) if t.len() > 2 => latest_partial = Some(t),
+                        SttEvent::Final(t) if t.len() > 2 => latest_final = Some(t),
+                        _ => {}
+                    }
+                }
 
-                match latest {
-                    SttEvent::Partial(text) if text.len() > 2 => {
-                        if let Ok(tr) = engine.translate_with(&mut ctx, &text, &src_lang, &tgt_lang) {
-                            if !tr.is_empty() {
-                                d2.lock().unwrap().update_en(&format!("[{tag}] {tr}"));
+                // A final wins: continue the committed prefix to the end of the
+                // segment, voice everything still unspoken, then reset.
+                if let Some(text) = latest_final {
+                    debug!("Translating final: '{text}'");
+                    match engine.translate_prefixed(&mut ctx, &text, &spoken, &src_lang, &tgt_lang) {
+                        Ok(tr) if !tr.is_empty() => {
+                            d2.lock().unwrap().commit(&format!("[{tag}] {tr}"));
+                            let already = spoken.split_whitespace().count();
+                            let words: Vec<&str> = tr.split_whitespace().collect();
+                            if words.len() > already {
+                                if let Some(s) = &speaker {
+                                    s.speak(&words[already..].join(" "));
+                                }
+                            }
+                        }
+                        _ => { d2.lock().unwrap().commit_ru_only(); }
+                    }
+                    spoken.clear();
+                    continue;
+                }
+
+                // Otherwise continue the committed prefix from the latest partial
+                // and commit/voice the freshly settled words (all but the last
+                // HOLD, which may still change as more speech arrives).
+                if let Some(text) = latest_partial {
+                    if let Ok(tr) = engine.translate_prefixed(&mut ctx, &text, &spoken, &src_lang, &tgt_lang) {
+                        if !tr.is_empty() {
+                            d2.lock().unwrap().update_en(&format!("[{tag}] {tr}"));
+                            let already = spoken.split_whitespace().count();
+                            let words: Vec<&str> = tr.split_whitespace().collect();
+                            let upto = words.len().saturating_sub(HOLD);
+                            if upto > already {
+                                if let Some(s) = &speaker {
+                                    s.speak(&words[already..upto].join(" "));
+                                }
+                                spoken = words[..upto].join(" ");
                             }
                         }
                     }
-                    SttEvent::Final(text) if text.len() > 2 => {
-                        debug!("Translating final: '{text}'");
-                        match engine.translate_with(&mut ctx, &text, &src_lang, &tgt_lang) {
-                            Ok(tr) if !tr.is_empty() => {
-                                d2.lock().unwrap().commit(&format!("[{tag}] {tr}"));
-                            }
-                            _ => { d2.lock().unwrap().commit_ru_only(); }
-                        }
-                    }
-                    _ => {}
                 }
             }
         }).map_err(|e| VoiceTranslatorError::Pipeline(format!("Translation thread: {e}")))?;
@@ -420,6 +501,16 @@ fn strip_tag(s: &str) -> &str {
         }
     }
     s
+}
+
+/// Number of leading whitespace-separated words that `a` and `b` share.
+/// Used for streaming "local agreement": the common prefix of two consecutive
+/// partial translations is considered stable enough to speak.
+fn common_word_prefix(a: &str, b: &str) -> usize {
+    a.split_whitespace()
+        .zip(b.split_whitespace())
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
 #[allow(dead_code)]
