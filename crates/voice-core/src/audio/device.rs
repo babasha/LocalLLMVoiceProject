@@ -57,6 +57,71 @@ pub fn find_output_device_by_name(name_substr: &str) -> Result<cpal::Device> {
     )))
 }
 
+/// Finds an input (capture) device by name substring.
+pub fn find_input_device_by_name(name_substr: &str) -> Result<cpal::Device> {
+    let needle = name_substr.to_lowercase();
+    for (name, device) in list_input_devices()? {
+        if name.to_lowercase().contains(&needle) {
+            info!("Found input device: {}", name);
+            return Ok(device);
+        }
+    }
+    Err(VoiceTranslatorError::DeviceNotFound(format!(
+        "No input device matching '{}'", name_substr
+    )))
+}
+
+/// Microphone: named one, or the system default when `name` is empty.
+pub fn microphone(name: &str) -> Result<cpal::Device> {
+    if name.trim().is_empty() {
+        default_input_device()
+    } else {
+        find_input_device_by_name(name)
+    }
+}
+
+/// Output device to capture in loopback mode (what the other party says in a
+/// call is played here): named one, or the system default output.
+pub fn loopback_source(name: &str) -> Result<cpal::Device> {
+    if name.trim().is_empty() {
+        default_output_device()
+    } else {
+        find_output_device_by_name(name)
+    }
+}
+
+/// True if two output selectors (name substrings, "" = default) refer to the
+/// same physical device. Used to detect TTS → loopback echo.
+pub fn same_output(a: &str, b: &str) -> bool {
+    let resolve = |s: &str| -> Option<String> {
+        if s.trim().is_empty() {
+            default_output_device().ok()?.name().ok()
+        } else {
+            find_output_device_by_name(s).ok()?.name().ok()
+        }
+    };
+    match (resolve(a), resolve(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a.trim().eq_ignore_ascii_case(b.trim()),
+    }
+}
+
+/// Machine-readable device list for the GUI:
+/// one line per device, `IN\t<name>` / `OUT\t<name>`, defaults marked with `*`.
+pub fn print_devices_tsv() -> Result<()> {
+    let def_in = default_input_device().ok().and_then(|d| d.name().ok());
+    let def_out = default_output_device().ok().and_then(|d| d.name().ok());
+    for (name, _) in list_input_devices()? {
+        let mark = if Some(&name) == def_in.as_ref() { "*" } else { "" };
+        println!("IN{mark}\t{name}");
+    }
+    for (name, _) in list_output_devices()? {
+        let mark = if Some(&name) == def_out.as_ref() { "*" } else { "" };
+        println!("OUT{mark}\t{name}");
+    }
+    Ok(())
+}
+
 /// Prints all audio devices for debugging.
 pub fn print_all_devices() -> Result<()> {
     println!("=== Input Devices ===");
@@ -68,10 +133,4 @@ pub fn print_all_devices() -> Result<()> {
         println!("  [OUT] {}", name);
     }
     Ok(())
-}
-
-/// Clone a device reference (cpal::Device is Clone on WASAPI).
-/// Needed because we might want both speakers and VB-Cable output.
-pub fn clone_device(device: &cpal::Device) -> cpal::Device {
-    device.clone()
 }

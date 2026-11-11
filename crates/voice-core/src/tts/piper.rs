@@ -21,7 +21,7 @@ use tracing::{error, info};
 use crate::audio::{device, playback};
 use crate::config::TtsConfig;
 use crate::error::{Result, VoiceTranslatorError};
-use crate::tts::Speaker;
+use crate::tts::{EchoGate, Speaker};
 
 /// Speaks text aloud via a Piper VITS model, streaming audio to the speakers.
 pub struct PiperSpeaker {
@@ -29,7 +29,7 @@ pub struct PiperSpeaker {
 }
 
 impl PiperSpeaker {
-    pub fn new(cfg: &TtsConfig) -> Result<Self> {
+    pub fn new(cfg: &TtsConfig, gate: Option<Arc<EchoGate>>) -> Result<Self> {
         let model = cfg.piper_model_path.clone();
         let tokens = cfg.piper_tokens_path.clone();
         let data_dir = cfg.piper_data_dir.clone();
@@ -120,6 +120,11 @@ impl PiperSpeaker {
                     match tts.generate_with_config(&text, &gen, no_cb) {
                         Some(audio) => {
                             let frames = resample_upmix(audio.samples(), model_sr, out_sr, out_ch);
+                            if let Some(g) = &gate {
+                                g.extend(Duration::from_secs_f64(
+                                    audio.samples().len() as f64 / model_sr.max(1) as f64,
+                                ));
+                            }
                             if let Ok(mut p) = producer.lock() {
                                 for s in frames {
                                     let mut v = s;

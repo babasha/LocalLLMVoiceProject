@@ -1,8 +1,18 @@
+# Build output
 /target
+
+# Models are downloaded (setup.sh / scripts/download_models.ps1 / UI "Models" tab)
 /models/*.bin
 /models/*.gguf
 /models/*.onnx
-/models/kokoro-voices/
+/models/*/
+
+# Local / editor state
 .env
+.claude/
+.vscode/
+.idea/
+
+# Audio scratch files
 *.wav
 *.mp3

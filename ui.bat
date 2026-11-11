@@ -1,3 +1,3 @@
 @echo off
-REM Launch the lightweight desktop UI for the voice translator.
-powershell -NoProfile -ExecutionPolicy Bypass -STA -File "%~dp0ui_win.ps1"
+REM Launch the desktop UI for the voice translator (lives in the system tray).
+start "" powershell -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%~dp0ui_win.ps1"

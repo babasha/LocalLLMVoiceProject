@@ -52,36 +52,3 @@ pub fn start_playback(
     info!("Audio playback started");
     Ok(stream)
 }
-
-/// Creates a dual-output setup: primary speakers + VB-Cable.
-/// Both output streams read from separate ring buffers that need to be fed
-/// with the same data by the caller.
-pub struct DualOutput {
-    pub primary_stream: cpal::Stream,
-    pub secondary_stream: Option<cpal::Stream>,
-}
-
-impl DualOutput {
-    pub fn new(
-        primary_device: &cpal::Device,
-        secondary_device: Option<&cpal::Device>,
-        sample_rate: u32,
-        channels: u16,
-        primary_consumer: Consumer<f32>,
-        secondary_consumer: Option<Consumer<f32>>,
-    ) -> Result<Self> {
-        let primary_stream = start_playback(primary_device, sample_rate, channels, primary_consumer)?;
-
-        let secondary_stream = match (secondary_device, secondary_consumer) {
-            (Some(device), Some(consumer)) => {
-                Some(start_playback(device, sample_rate, channels, consumer)?)
-            }
-            _ => None,
-        };
-
-        Ok(DualOutput {
-            primary_stream,
-            secondary_stream,
-        })
-    }
-}

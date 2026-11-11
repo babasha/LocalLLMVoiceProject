@@ -1,8 +1,5 @@
 [workspace]
-members = [
-    "crates/voice-core",
-    "src-tauri",
-]
+members = ["crates/voice-core"]
 resolver = "2"
 
 [profile.release]

@@ -150,15 +150,21 @@ download \
     "$MODELS_DIR/gigaam_v3_e2e_ctc_int8.onnx" \
     "GigaAM-v3 STT INT8 (~320 MB)"
 
-# Piper TTS (~63 MB)
-download \
-    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx" \
-    "$MODELS_DIR/piper-en_US-lessac-medium.onnx" \
-    "Piper TTS en_US (~63 MB)"
+# Piper TTS (~78 MB, sherpa-onnx package with espeak-ng-data)
+if [ -f "$MODELS_DIR/vits-piper-en_US-lessac-medium/en_US-lessac-medium.onnx" ]; then
+    ok "Piper TTS en_US — already exists"
+else
+    download \
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2" \
+        "$MODELS_DIR/vits-piper-en_US-lessac-medium.tar.bz2" \
+        "Piper TTS en_US (~78 MB)"
+    tar -xjf "$MODELS_DIR/vits-piper-en_US-lessac-medium.tar.bz2" -C "$MODELS_DIR"
+    rm -f "$MODELS_DIR/vits-piper-en_US-lessac-medium.tar.bz2"
+fi
 
 # Qwen3.5-4B translation (~2.7 GB)
 download \
-    "https://huggingface.co/AaryanK/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf" \
+    "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf" \
     "$MODELS_DIR/Qwen3.5-4B-Q4_K_M.gguf" \
     "Qwen3.5-4B Q4_K_M (~2.7 GB)"
 

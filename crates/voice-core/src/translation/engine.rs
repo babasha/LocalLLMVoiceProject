@@ -17,7 +17,16 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
 
-/// LLM-based translation engine using Qwen3.5-4B via llama.cpp.
+/// Chat-template family for prompt construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptStyle {
+    /// Qwen / ChatML: `<|im_start|>` roles, optional `<think>` block.
+    ChatMl,
+    /// Gemma: `<start_of_turn>` turns, no system role, no thinking.
+    Gemma,
+}
+
+/// LLM-based translation engine (Qwen3.5 / Gemma 4) via llama.cpp.
 pub struct TranslationEngine {
     config: TranslationConfig,
     backend: Arc<LlamaBackend>,
@@ -180,7 +189,10 @@ impl TranslationEngine {
                     VoiceTranslatorError::Translation(format!("Token decode failed: {e}"))
                 })?;
 
-            if output.contains("<think>") || piece.contains("<|im_end|>") {
+            if output.contains("<think>")
+                || piece.contains("<|im_end|>")
+                || piece.contains("<end_of_turn>")
+            {
                 break;
             }
 
@@ -222,6 +234,21 @@ impl TranslationEngine {
         Ok(result)
     }
 
+    /// Which chat template to emit. Resolved from `prompt_style` config, or
+    /// auto-detected from the model filename when that is blank.
+    fn prompt_style(&self) -> PromptStyle {
+        let hint = if self.config.prompt_style.is_empty() {
+            self.config.model_path.to_lowercase()
+        } else {
+            self.config.prompt_style.to_lowercase()
+        };
+        if hint.contains("gemma") {
+            PromptStyle::Gemma
+        } else {
+            PromptStyle::ChatMl
+        }
+    }
+
     fn build_chat_prompt(
         &self,
         text: &str,
@@ -232,22 +259,29 @@ impl TranslationEngine {
         let system = prompt::system_prompt(source_lang, target_lang);
         let user = prompt::build_translation_prompt(text, source_lang, target_lang);
 
-        // Prefill the assistant turn with the already-spoken English so the model
-        // continues from it (incremental/simultaneous decoding) rather than
-        // re-emitting the whole sentence. No trailing space: the next generated
-        // token piece carries its own leading space.
-        let head = if self.config.enable_thinking {
-            format!(
+        // The assistant turn is prefilled with `prefix` — the English we've
+        // already spoken — so the model *continues* it (incremental/simultaneous
+        // decoding) instead of re-emitting the whole sentence. No trailing space:
+        // the next generated token piece carries its own leading space.
+        let head = match self.prompt_style() {
+            // Gemma has no system role and no <think>: fold the instructions into
+            // the single user turn. BOS is added by AddBos::Always, so we must
+            // NOT emit a literal <bos> here. End-of-turn is an EOG token, so the
+            // generation loop stops on it via is_eog_token.
+            PromptStyle::Gemma => format!(
+                "<start_of_turn>user\n{system}\n\n{user}<end_of_turn>\n\
+                 <start_of_turn>model\n"
+            ),
+            PromptStyle::ChatMl if self.config.enable_thinking => format!(
                 "<|im_start|>system\n{system}<|im_end|>\n\
                  <|im_start|>user\n{user}<|im_end|>\n\
                  <|im_start|>assistant\n"
-            )
-        } else {
-            format!(
+            ),
+            PromptStyle::ChatMl => format!(
                 "<|im_start|>system\n{system}<|im_end|>\n\
                  <|im_start|>user\n{user}<|im_end|>\n\
                  <|im_start|>assistant\n<think>\n</think>\n"
-            )
+            ),
         };
         format!("{head}{prefix}")
     }
@@ -266,7 +300,9 @@ impl TranslationEngine {
         s = s
             .replace("<|im_end|>", "")
             .replace("<|im_start|>", "")
-            .replace("<|endoftext|>", "");
+            .replace("<|endoftext|>", "")
+            .replace("<end_of_turn>", "")
+            .replace("<start_of_turn>", "");
 
         let trimmed = s.trim();
         let trimmed = trimmed.strip_prefix('"').unwrap_or(trimmed);

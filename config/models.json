@@ -1,0 +1,57 @@
+{
+  "models": [
+    {
+      "id": "vad",
+      "name": "Silero VAD v5",
+      "purpose": { "ru": "Детектор речи", "en": "Voice activity detection" },
+      "size_mb": 2,
+      "needed": ["full", "listen", "duplex"],
+      "check": "models/silero_vad.onnx",
+      "files": [
+        { "url": "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx", "path": "models/silero_vad.onnx" }
+      ]
+    },
+    {
+      "id": "gigaam",
+      "name": "GigaAM-v3 e2e CTC (INT8)",
+      "purpose": { "ru": "Распознавание вашей речи (RU)", "en": "Your speech recognition (RU)" },
+      "size_mb": 320,
+      "needed": ["full", "duplex"],
+      "check": "models/gigaam_v3_e2e_ctc_int8.onnx",
+      "files": [
+        { "url": "https://huggingface.co/Smirnov75/GigaAM-v3-sherpa-onnx/resolve/main/gigaam_v3_e2e_ctc_int8.onnx", "path": "models/gigaam_v3_e2e_ctc_int8.onnx" },
+        { "url": "https://huggingface.co/Smirnov75/GigaAM-v3-sherpa-onnx/resolve/main/gigaam_v3_e2e_ctc_tokens.txt", "path": "models/gigaam_v3_e2e_ctc_tokens.txt" }
+      ]
+    },
+    {
+      "id": "parakeet",
+      "name": "Parakeet TDT 0.6B v3 (INT8)",
+      "purpose": { "ru": "Речь собеседника (EN + 24 языка)", "en": "Other party's speech (EN + 24 langs)" },
+      "size_mb": 490,
+      "needed": ["listen", "duplex"],
+      "check": "models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx",
+      "archive": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2"
+    },
+    {
+      "id": "qwen",
+      "name": "Qwen3.5-4B Q4_K_M",
+      "purpose": { "ru": "Перевод (LLM)", "en": "Translation (LLM)" },
+      "size_mb": 2740,
+      "needed": ["full", "listen", "duplex"],
+      "check": "models/Qwen3.5-4B-Q4_K_M.gguf",
+      "llm": true,
+      "files": [
+        { "url": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf", "path": "models/Qwen3.5-4B-Q4_K_M.gguf" }
+      ]
+    },
+    {
+      "id": "piper_en",
+      "name": "Piper en_US lessac (VITS)",
+      "purpose": { "ru": "Озвучка перевода (EN)", "en": "Spoken translation (EN)" },
+      "size_mb": 67,
+      "needed": ["full", "duplex"],
+      "check": "models/vits-piper-en_US-lessac-medium/tokens.txt",
+      "archive": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-medium.tar.bz2"
+    }
+  ]
+}

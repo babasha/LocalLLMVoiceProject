@@ -7,7 +7,6 @@ use crate::error::{Result, VoiceTranslatorError};
 /// Voice Activity Detector using Silero VAD v5 via sherpa-onnx.
 pub struct VadDetector {
     vad: VoiceActivityDetector,
-    sample_rate: u32,
 }
 
 impl VadDetector {
@@ -35,7 +34,7 @@ impl VadDetector {
             config.threshold, config.silence_duration_ms, config.max_speech_duration_ms
         );
 
-        Ok(VadDetector { vad, sample_rate })
+        Ok(VadDetector { vad })
     }
 
     /// Feed audio samples to the VAD.
@@ -46,11 +45,6 @@ impl VadDetector {
     /// Returns true if speech is currently being detected.
     pub fn is_speech(&self) -> bool {
         self.vad.detected()
-    }
-
-    /// Returns true if there are completed speech segments available.
-    pub fn has_segment(&self) -> bool {
-        !self.vad.is_empty()
     }
 
     /// Get the next completed speech segment's audio and remove it from the queue.
@@ -64,17 +58,8 @@ impl VadDetector {
         Some(audio)
     }
 
-    /// Flush any trailing speech on shutdown.
+    /// Close the current speech segment now (forced split / shutdown).
     pub fn flush(&self) {
         self.vad.flush();
-    }
-
-    /// Reset VAD state.
-    pub fn reset(&self) {
-        self.vad.reset();
-    }
-
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
     }
 }

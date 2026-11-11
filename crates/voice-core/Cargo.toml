@@ -22,9 +22,6 @@ rtrb = "0.3"
 # Inter-thread messaging
 crossbeam-channel = "0.5"
 
-# Audio resampling
-rubato = "0.16"
-
 # Config
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
@@ -43,20 +40,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Ctrl+C handling
 ctrlc = "3.4"
 
-# Utilities
-hound = "3.5"
+# LLM inference (GGUF via llama.cpp). 0.1.146+ is required for the qwen35 / gemma4 architectures.
+llama-cpp-2 = { version = "0.1.146", features = ["cuda"] }
 
-# LLM inference (Qwen3.5-4B via llama.cpp)
-llama-cpp-2 = { version = "0.1", features = ["cuda"] }
-
-# STT inference (GigaAM-v3 via sherpa-onnx)
+# VAD + STT + TTS (sherpa-onnx)
 sherpa-onnx = "1.12.31"
 
 # UTF-8 decoding for token output
 encoding_rs = "0.8"
-
-# Terminal size detection
-libc = "0.2"
-
-[dev-dependencies]
-assert_no_alloc = "1.1"

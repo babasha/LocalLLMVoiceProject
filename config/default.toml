@@ -1,4 +1,13 @@
 # Voice Translator Configuration
+#
+# Relative paths are resolved against the project root (the folder that
+# contains config/), so the config works on any machine. Absolute paths
+# still work. Models are listed in config/models.json and can be downloaded
+# from the UI's "Models" tab.
+#
+# NOTE (Windows): keep models outside an OneDrive-synced folder, or mark the
+# models/ folder "Always keep on this device" — cloud placeholders make
+# llama.cpp fail with "failed to read magic".
 
 [audio]
 # Sample rate for capture and processing
@@ -7,20 +16,21 @@ sample_rate = 16000
 channels = 1
 # Ring buffer capacity in samples (~1 second at 16kHz)
 ring_buffer_capacity = 16384
-# Output device name substring for VB-Cable (leave empty for default)
-vb_cable_device = ""
-# Enable dual output (speakers + VB-Cable)
-dual_output = false
+# Microphone (name substring). Empty = system default.
+input_device = ""
+# listen/duplex modes: output device whose sound is captured via WASAPI
+# loopback — i.e. where the call/video plays. Empty = system default output.
+loopback_device = ""
 
 [languages]
 # Source language (what you speak)
 source = "ru"
-# Target language (what gets synthesized)
+# Target language (what gets synthesized).
+# In listen/duplex mode the other party is translated target -> source.
 target = "en"
 
 [vad]
-# Path to Silero VAD v5 ONNX model
-model_path = "C:/voice-translator/models/silero_vad.onnx"
+model_path = "models/silero_vad.onnx"
 # Speech detection threshold (0.0 - 1.0)
 threshold = 0.5
 # Silence duration (ms) to mark end of speech.
@@ -33,16 +43,43 @@ min_speech_duration_ms = 300
 max_speech_duration_ms = 7000
 
 [stt]
-# Path to GigaAM-v3 e2e CTC INT8 model (NeMo format, with punctuation)
-model_path = "C:/voice-translator/models/gigaam_v3_e2e_ctc_int8.onnx"
-# Path to tokens vocabulary file
-tokens_path = "C:/voice-translator/models/gigaam_v3_e2e_ctc_tokens.txt"
-# Language hint (empty = auto-detect)
+# Your speech. GigaAM-v3 e2e CTC INT8 (NeMo format, with punctuation)
+engine = "nemo_ctc"
+model_path = "models/gigaam_v3_e2e_ctc_int8.onnx"
+tokens_path = "models/gigaam_v3_e2e_ctc_tokens.txt"
 language = "ru"
 
+[stt.filter]
+# Segments quieter than this RMS are noise (clicks, breathing) — not transcribed.
+min_rms = 0.004
+# "да да да да да" -> "да да да"
+max_repeats = 3
+# Extra phrases to drop, on top of the built-in Whisper hallucination list.
+blocklist = []
+
+[stt_listen]
+# The other party's speech (listen/duplex modes): NVIDIA Parakeet TDT 0.6B v3,
+# 25 European languages incl. English, auto language detection.
+engine = "nemo_transducer"
+encoder_path = "models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/encoder.int8.onnx"
+decoder_path = "models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/decoder.int8.onnx"
+joiner_path = "models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/joiner.int8.onnx"
+tokens_path = "models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/tokens.txt"
+
+[stt_listen.filter]
+# System audio (music, game sounds) needs a slightly stricter gate.
+min_rms = 0.006
+max_repeats = 3
+blocklist = []
+
 [translation]
-# Path to Qwen3.5-4B GGUF model
-model_path = "C:/voice-translator/models/Qwen3.5-4B-Q4_K_M.gguf"
+# Translation LLM (GGUF via llama.cpp). Can be switched in the UI (Settings).
+model_path = "models/Qwen3.5-4B-Q4_K_M.gguf"
+# Alternative: Gemma 4 E2B-it QAT (Q4_0) — fewer active parameters than
+# Qwen3.5-4B, so faster per token. Any GGUF path works, e.g. one from LM Studio:
+# model_path = "C:/path/to/gemma-4-E2B-it-QAT-Q4_0.gguf"
+# Chat template: "gemma" | "chatml"/"qwen" | "" (auto-detect from filename).
+prompt_style = ""
 # Number of GPU layers to offload (99 = all layers)
 n_gpu_layers = 99
 # Context size (4096 is plenty for translation)
@@ -58,16 +95,10 @@ enable_thinking = false
 [tts]
 # Speaking engine: "piper" (streaming neural, recommended) or "sapi" (built-in Windows voice)
 engine = "piper"
-# Kokoro model path (unused placeholder)
-kokoro_model_path = "C:/voice-translator/models/kokoro-v0_19-fp16.onnx"
 # Piper VITS model + phonemization assets (from sherpa vits-piper bundle)
-piper_model_path = "C:/voice-translator/models/vits-piper-en_US-lessac-medium/en_US-lessac-medium.onnx"
-piper_tokens_path = "C:/voice-translator/models/vits-piper-en_US-lessac-medium/tokens.txt"
-piper_data_dir = "C:/voice-translator/models/vits-piper-en_US-lessac-medium/espeak-ng-data"
-# Voice name/id for Kokoro
-kokoro_voice = "af_heart"
-# Output sample rate
-output_sample_rate = 24000
+piper_model_path = "models/vits-piper-en_US-lessac-medium/en_US-lessac-medium.onnx"
+piper_tokens_path = "models/vits-piper-en_US-lessac-medium/tokens.txt"
+piper_data_dir = "models/vits-piper-en_US-lessac-medium/espeak-ng-data"
 # Speak the English translation aloud
 speak = true
 # Output device for spoken audio. Empty = default speakers.
@@ -76,3 +107,12 @@ speak = true
 output_device = ""
 # Speech rate: SAPI -10..10; Piper speed = 1.0 + rate*0.05. Slightly faster keeps up with live speech.
 rate = 2
+
+[pipeline]
+# Warn (console + UI) when an utterance waited longer than this for the LLM.
+lag_warn_ms = 2500
+# Several finished utterances queued -> translate them in one LLM call.
+merge_backlog = true
+# Utterances older than this are shown untranslated and not spoken
+# (late speech is worse than none in a live conversation). 0 = never drop.
+drop_after_ms = 12000

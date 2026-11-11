@@ -1,38 +1,42 @@
-# Download all models for voice-translator
-# Requires: PowerShell 5.1+
+# Download the models listed in config/models.json (same manifest as the UI's
+# "Models" tab).
+#
+#   .\scripts\download_models.ps1                # models needed for -Mode full
+#   .\scripts\download_models.ps1 -Mode duplex   # full | listen | duplex
+#   .\scripts\download_models.ps1 -All
+#
+# Requires: PowerShell 5.1+, Windows 10+ (tar.exe for .tar.bz2 archives).
+param(
+    [ValidateSet("full", "listen", "duplex")] [string]$Mode = "full",
+    [switch]$All
+)
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is ~10x faster without the progress bar
 
-$ModelsDir = Join-Path $PSScriptRoot ".." "models"
-New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
+$Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+$Manifest = (Get-Content (Join-Path $Root "config\models.json") -Raw -Encoding UTF8 | ConvertFrom-Json).models
+$Tar = Join-Path $env:SystemRoot "System32\tar.exe"
 
-Write-Host "=== Downloading models to $ModelsDir ===" -ForegroundColor Cyan
+foreach ($m in $Manifest) {
+    if (-not $All -and -not (@($m.needed) -contains $Mode)) { continue }
+    $check = Join-Path $Root $m.check
+    if (Test-Path $check) { Write-Host "[ok]   $($m.name)" -ForegroundColor Gray; continue }
 
-# Whisper large-v3-turbo Q8
-$WhisperUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin"
-$WhisperPath = Join-Path $ModelsDir "ggml-large-v3-turbo-q8.bin"
-if (-not (Test-Path $WhisperPath)) {
-    Write-Host "Downloading Whisper large-v3-turbo Q8..." -ForegroundColor Yellow
-    Invoke-WebRequest -Uri $WhisperUrl -OutFile $WhisperPath
-    Write-Host "Done: $WhisperPath" -ForegroundColor Green
-} else {
-    Write-Host "Whisper model already exists, skipping." -ForegroundColor Gray
+    Write-Host "[get]  $($m.name) (~$($m.size_mb) MB)" -ForegroundColor Yellow
+    if ($m.archive) {
+        $tmp = Join-Path $env:TEMP ([System.IO.Path]::GetFileName($m.archive))
+        Invoke-WebRequest -Uri $m.archive -OutFile $tmp -UseBasicParsing
+        & $Tar -xjf $tmp -C (Join-Path $Root "models")
+        if ($LASTEXITCODE -ne 0) { throw "tar failed for $tmp" }
+        Remove-Item -LiteralPath $tmp
+    } else {
+        foreach ($f in $m.files) {
+            $dest = Join-Path $Root $f.path
+            if (Test-Path $dest) { continue }
+            New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
+            Invoke-WebRequest -Uri $f.url -OutFile "$dest.part" -UseBasicParsing
+            Move-Item -LiteralPath "$dest.part" -Destination $dest -Force
+        }
+    }
+    Write-Host "[done] $($m.name)" -ForegroundColor Green
 }
-
-# Qwen3.5-2B Q4_K_M GGUF
-$QwenUrl = "https://huggingface.co/AaryanK/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"
-$QwenPath = Join-Path $ModelsDir "Qwen3.5-2B-Q4_K_M.gguf"
-if (-not (Test-Path $QwenPath)) {
-    Write-Host "Downloading Qwen3.5-2B Q4_K_M GGUF..." -ForegroundColor Yellow
-    Invoke-WebRequest -Uri $QwenUrl -OutFile $QwenPath
-    Write-Host "Done: $QwenPath" -ForegroundColor Green
-} else {
-    Write-Host "Qwen model already exists, skipping." -ForegroundColor Gray
-}
-
-# Kokoro TTS model (placeholder URL - check kokorox GitHub for actual URL)
-Write-Host ""
-Write-Host "NOTE: Kokoro and Piper TTS models need to be downloaded manually:" -ForegroundColor Yellow
-Write-Host "  Kokoro: https://github.com/WismutHansen/kokorox/releases" -ForegroundColor White
-Write-Host "  Piper:  https://github.com/rhasspy/piper/blob/master/VOICES.md" -ForegroundColor White
-
-Write-Host ""
-Write-Host "=== Model download complete ===" -ForegroundColor Cyan
